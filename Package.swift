@@ -19,6 +19,7 @@ let package = Package(
     //.package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.0.0"),
     .package(url: "https://github.com/btoms20/swift-nio-ssl.git", branch: "quic"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "2.5.0"),
+    .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
   ],
   targets: [
     .target(
@@ -30,6 +31,7 @@ let package = Package(
         .product(name: "NIOPosix", package: "swift-nio"),
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "_CryptoExtras", package: "swift-crypto"),
+        .product(name: "Logging", package: "swift-log"),
       ]
     ),
     .testTarget(

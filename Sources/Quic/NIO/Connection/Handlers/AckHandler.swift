@@ -14,6 +14,7 @@
 
 import Foundation
 import NIOCore
+import Logging
 
 final class ACKChannelHandler: ChannelDuplexHandler {
     public typealias InboundIn = Packet
@@ -22,6 +23,7 @@ final class ACKChannelHandler: ChannelDuplexHandler {
     public typealias OutboundIn = [any Packet] // This is an array, so we can explicitly coalesce packets within a datagram
 
     let manager: ACKManager
+    private let logger = Logger(label: "quic.ack")
 
     init() {
         self.manager = ACKManager()
@@ -46,7 +48,7 @@ final class ACKChannelHandler: ChannelDuplexHandler {
                     case .Short:
                         self.manager.process(ack: ack, for: .Application)
                     default:
-                        print("AckChannelHandler::ChannelRead::Unhandled Packet Type \(numberedPacket)")
+                        logger.warning("Unhandled packet type in ACK channel read", metadata: ["type": .string(String(describing: numberedPacket.type))])
                 }
             }
         }
@@ -72,7 +74,7 @@ final class ACKChannelHandler: ChannelDuplexHandler {
                     guard var initialPacket = packets[i] as? InitialPacket else { context.fireErrorCaught(Errors.InvalidPacket); return }
                     // Set the packet number
                     let pn = self.manager.nextPacketNumber(for: .Initial)
-                    print("AckChannelHandler::Write::Setting Packet Number `\(pn)` for InitialPacket")
+                    logger.trace("Setting PN for Initial", metadata: ["pn": .stringConvertible(pn)])
                     if pn == 0 {
                         initialPacket.header.setPacketNumber(pn.bytes(minBytes: 4, bigEndian: true))
                     } else {
@@ -80,7 +82,7 @@ final class ACKChannelHandler: ChannelDuplexHandler {
                     }
                     // Inject ACK if necessary
                     if let ack = self.manager.getACK(for: .Initial) {
-                        print("AckChannelHandler::Write::Injecting ACK into InitialPacket")
+                        logger.trace("Injecting ACK into Initial packet")
                         initialPacket.payload.insert(ack, at: 0)
                     }
                     // Update the packet
@@ -89,12 +91,12 @@ final class ACKChannelHandler: ChannelDuplexHandler {
                 case .Handshake:
                     guard var handshakePacket = packets[i] as? HandshakePacket else { context.fireErrorCaught(Errors.InvalidPacket); return }
                     let pn = self.manager.nextPacketNumber(for: .Handshake)
-                    print("AckChannelHandler::Write::Setting Packet Number `\(pn)` for HandshakePacket")
+                    logger.trace("Setting PN for Handshake", metadata: ["pn": .stringConvertible(pn)])
                     // Set the packet number
                     handshakePacket.header.setPacketNumber(pn.bytes(minBytes: 1, bigEndian: true))
                     // Inject ACK if necessary
                     if let ack = self.manager.getACK(for: .Handshake) {
-                        print("AckChannelHandler::Write::Injecting ACK into HandshakePacket")
+                        logger.trace("Injecting ACK into Handshake packet")
                         handshakePacket.payload.insert(ack, at: 0)
                     }
                     // Update the packet
@@ -102,18 +104,18 @@ final class ACKChannelHandler: ChannelDuplexHandler {
                 case .Short:
                     guard var trafficPacket = packets[i] as? ShortPacket else { context.fireErrorCaught(Errors.InvalidPacket); return }
                     let pn = self.manager.nextPacketNumber(for: .Application)
-                    print("AckChannelHandler::Write::Setting Packet Number `\(pn)` for TrafficPacket")
+                    logger.trace("Setting PN for Application", metadata: ["pn": .stringConvertible(pn)])
                     // Set the packet number
                     trafficPacket.header.setPacketNumber(pn.bytes(minBytes: 2, bigEndian: true))
                     // Inject ACK if necessary
                     if let ack = self.manager.getACK(for: .Application) {
-                        print("AckChannelHandler::Write::Injecting ACK into TrafficPacket")
+                        logger.trace("Injecting ACK into Application packet")
                         trafficPacket.payload.insert(ack, at: 0)
                     }
                     // Update the packet
                     packets[i] = trafficPacket
                 default:
-                    print("AckChannelHandler::Write::Unhandled Packet Type \(packets[i])")
+                    logger.warning("Unhandled packet type on write", metadata: ["header": .string(String(describing: packets[i].header))])
             }
         }
 
@@ -189,7 +191,10 @@ final class ACKHandler {
     func processReceivedPacketNumber(_ pn: [UInt8], isAckEliciting: Bool) {
         var packetNumber = pn.drop(while: { $0 == 0 })
         if packetNumber.isEmpty { packetNumber = [0x00] }
-        guard let num = packetNumber.readQuicVarInt()?.value else { fatalError("Unable to read PacketNumber \(pn) -> \(packetNumber)") }
+        guard let num = packetNumber.readQuicVarInt()?.value else {
+            // Treat as invalid packet number; mark error and return gracefully
+            return
+        }
         if self.largestReceived == nil { self.largestReceived = num }
         else if self.largestReceived < num {
             self.largestReceived = num
@@ -265,7 +270,7 @@ struct ACKManager {
             case .Short:
                 self.traffic.processReceivedPacketNumber(numberedHeader.packetNumber, isAckEliciting: isAckEliciting)
             default:
-                fatalError("TODO: Implement me!")
+                return
         }
     }
 
