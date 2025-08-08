@@ -38,34 +38,18 @@ public struct TLSRecordClientHello {
         } else {
             self.header = consumeBytes(5, from: &b)
             let recordLength = Int(Array(self.header[3...]).hexString, radix: 16)
-            if recordLength != b.count {
-                print("Warning: Record Length Byte Mismatch!!")
-                print("Record Length: \(recordLength)")
-                print("Byte Count: \(b.count)")
-            }
+            if recordLength != b.count { }
         }
         self.handshakeType = consumeBytes(1, from: &b)
         let recordSize = try readInt(3, from: &b)
-        guard recordSize <= b.count else {
-            print("Warning: Record Size Mismatch!!")
-            print("Record Size: \(recordSize)")
-            print("Byte Count: \(b.count)")
-            throw Errors.invalidRecordSize
-        }
+        guard recordSize <= b.count else { throw Errors.invalidRecordSize }
         self.tlsVersion = consumeBytes(2, from: &b)
         self.random = consumeBytes(32, from: &b)
 
         let sessionIDLength = try readInt(1, from: &b)
-        if sessionIDLength > 0 {
-            let sid = consumeBytes(sessionIDLength, from: &b)
-            self.sessionID = sid
-            print("Non nill session ID: \(sid.hexString)")
-        } else {
-            self.sessionID = nil
-        }
+        if sessionIDLength > 0 { self.sessionID = consumeBytes(sessionIDLength, from: &b) } else { self.sessionID = nil }
 
         let cipherSuiteLength = try readInt(2, from: &b)
-        print("Cipher Suite Length: \(cipherSuiteLength)")
         var supportedSuites: [[UInt8]] = []
         for _ in 0..<(cipherSuiteLength / 2) {
             supportedSuites.append(consumeBytes(2, from: &b))
@@ -73,7 +57,6 @@ public struct TLSRecordClientHello {
         self.cipherSuites = supportedSuites
 
         let compressionMethodsLength = try readInt(1, from: &b)
-        print("Compression Methods Length: \(compressionMethodsLength)")
         var supportedMethods: [[UInt8]] = []
         for _ in 0..<compressionMethodsLength {
             supportedMethods.append(consumeBytes(1, from: &b))
@@ -81,12 +64,7 @@ public struct TLSRecordClientHello {
         self.compressionMethods = supportedMethods
 
         let extensionsLength = try readInt(2, from: &b)
-        guard extensionsLength <= b.count else {
-            print(extensionsLength)
-            print(b.count)
-            print(b.hexString)
-            throw Errors.invalidExtensionSize
-        }
+        guard extensionsLength <= b.count else { throw Errors.invalidExtensionSize }
 
         var exts: [Extension] = []
         while let ext = try? Extension(&b) {
@@ -194,9 +172,6 @@ public struct TLSRecordServerHello {
             self.header = consumeBytes(5, from: &b)
             let recordLength = Int(Array(self.header[3...]).hexString, radix: 16)
             if recordLength != b.count {
-                print("Warning: Record Length Byte Mismatch!!")
-                print("Record Length: \(recordLength!)")
-                print("Byte Count: \(b.count)")
                 self.padding = Array(b[recordLength!...])
                 b = Array(b[0..<recordLength!])
             }
@@ -204,35 +179,19 @@ public struct TLSRecordServerHello {
 
         self.handshakeType = consumeBytes(1, from: &b)
         let recordSize = try readInt(3, from: &b)
-        guard recordSize <= b.count else {
-            print("Warning: Record Size Mismatch!!")
-            print("Record Size: \(recordSize)")
-            print("Byte Count: \(b.count)")
-            throw Errors.invalidRecordSize
-        }
+        guard recordSize <= b.count else { throw Errors.invalidRecordSize }
         self.tlsVersion = consumeBytes(2, from: &b)
         self.random = consumeBytes(32, from: &b)
 
         let sessionIDLength = try readInt(1, from: &b)
-        if sessionIDLength > 0 {
-            let sid = consumeBytes(sessionIDLength, from: &b)
-            self.sessionID = sid
-            print("Non nill session ID: \(sid.hexString)")
-        } else {
-            self.sessionID = nil
-        }
+        if sessionIDLength > 0 { self.sessionID = consumeBytes(sessionIDLength, from: &b) } else { self.sessionID = nil }
 
         self.cipherSuite = consumeBytes(2, from: &b)
 
         self.compressionMethod = consumeBytes(1, from: &b)
 
         let extensionsLength = try readInt(2, from: &b)
-        guard extensionsLength <= b.count else {
-            print(extensionsLength)
-            print(b.count)
-            print(b.hexString)
-            throw Errors.invalidExtensionSize
-        }
+        guard extensionsLength <= b.count else { throw Errors.invalidExtensionSize }
 
         var exts: [Extension] = []
         while let ext = try? Extension(&b) {
@@ -278,7 +237,8 @@ public struct TLSRecordServerHello {
 
                 /// Prefix TLS Record Header
                 let totalPayloadLength = bytes(of: UInt8(finalPayload.count), to: UInt8.self, droppingZeros: false)
-                finalPayload.insert(contentsOf: try! Array(hexString: "0200000000060040") + totalPayloadLength, at: 0)
+                let prefix: [UInt8] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x40]
+                finalPayload.insert(contentsOf: prefix + totalPayloadLength, at: 0)
 
                 return finalPayload
             case .headerless:
@@ -558,11 +518,7 @@ public struct ClientHello: TLSRecordExtensible {
         let header = consumeBytes(5, from: &b)
         let recordLength = Int(Array(header[3...]).hexString, radix: 16)
         // TODO: Drop Padding Here
-        if recordLength != b.count {
-            print("Warning: Record Length Byte Mismatch!!")
-            print("Record Length: \(recordLength!)")
-            print("Byte Count: \(b.count)")
-        }
+        // Note: tolerate length mismatch for now; future: strict parse/logging
 
         try self.init(header: header, payload: &b)
     }
@@ -571,11 +527,7 @@ public struct ClientHello: TLSRecordExtensible {
         let header = consumeBytes(4, from: &b)
         let recordLength = Array(header[2...]).readQuicVarInt()! //- 1
         // TODO: Drop Padding Here
-        if recordLength != b.count {
-            print("Warning: Record Length Byte Mismatch!!")
-            print("Record Length: \(recordLength)")
-            print("Byte Count: \(b.count)")
-        }
+        // Note: tolerate length mismatch for now; future: strict parse/logging
 
         try self.init(header: header, payload: &b)
     }
@@ -589,12 +541,7 @@ public struct ClientHello: TLSRecordExtensible {
         }
         self.handshakeType = type
         let recordSize = (try readInt(3, from: &b)) //- 1
-        guard recordSize <= b.count else {
-            print("Warning: Record Size Mismatch!!")
-            print("Record Size: \(recordSize)")
-            print("Byte Count: \(b.count)")
-            throw Errors.invalidRecordSize
-        }
+        guard recordSize <= b.count else { throw Errors.invalidRecordSize }
         self.tlsVersion = consumeBytes(2, from: &b)
         self.random = consumeBytes(32, from: &b)
 
@@ -602,7 +549,7 @@ public struct ClientHello: TLSRecordExtensible {
         if sessionIDLength > 0 {
             let sid = consumeBytes(sessionIDLength, from: &b)
             self.sessionID = sid
-            print("Non nill session ID: \(sid.hexString)")
+            // non-nil session id observed
         } else {
             self.sessionID = nil
         }
@@ -624,12 +571,7 @@ public struct ClientHello: TLSRecordExtensible {
         self.compressionMethods = supportedMethods
 
         let extensionsLength = try readInt(2, from: &b) //- 1
-        guard extensionsLength <= b.count else {
-            print(extensionsLength)
-            print(b.count)
-            print(b.hexString)
-            throw Errors.invalidExtensionSize
-        }
+        guard extensionsLength <= b.count else { throw Errors.invalidExtensionSize }
 
         var exts: [Extension] = []
         while let ext = try? Extension(&b) {
@@ -858,9 +800,7 @@ public struct ClientFinished {
         let length = try! readInt(3, from: &lengthBytes)
 
         self.payload = Array(combined[4...])
-        if self.payload.count != length {
-            print("payload count \(self.payload.count) != length specified \(length)")
-        }
+        if self.payload.count != length { }
     }
 
     public init(hash: [UInt8]) {
@@ -883,7 +823,6 @@ public struct ClientFinished {
                 b.insert(contentsOf: [0x06, 0x00] + length, at: 0)
                 return b
             case .tlsRecord:
-                print("ERROR! We dont support encoding ClientFinished messages as \(type)")
                 return []
         }
     }
@@ -900,9 +839,7 @@ public struct ServerFinished {
         let length = try! readInt(3, from: &lengthBytes)
 
         self.payload = Array(combined[4...])
-        if self.payload.count != length {
-            print("payload count \(self.payload.count) != length specified \(length)")
-        }
+        if self.payload.count != length { }
     }
 
     public init(hash: [UInt8]) {
@@ -925,7 +862,6 @@ public struct ServerFinished {
                 b.insert(contentsOf: [0x06, 0x00] + length, at: 0)
                 return b
             case .tlsRecord:
-                print("ERROR! We dont support encoding ClientFinished messages as \(type)")
                 return []
         }
     }

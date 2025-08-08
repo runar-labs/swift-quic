@@ -57,7 +57,7 @@ protocol NumberedHeader: Header {
 
 extension NumberedHeader {
     var packetNumberLength: PacketNumberLength {
-        guard let pnl = PacketNumberLength(length: self.packetNumberLengthByteCount) else { fatalError("invalid packet number length") }
+        guard let pnl = PacketNumberLength(length: self.packetNumberLengthByteCount) else { return ._1 }
         return pnl
     }
 
@@ -96,7 +96,7 @@ extension Header {
                         return false
                 }
             default:
-                fatalError("Invalid Header Form")
+                return false
         }
     }
 }

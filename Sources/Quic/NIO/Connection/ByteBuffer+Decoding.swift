@@ -115,7 +115,7 @@ extension ByteBuffer {
 
     mutating func decryptBytes(at offset: Int, packetLength: Int, headerOffset: Int, packetNumber: [UInt8], using opener: Opener, paddingRemovalStrategy: PaddingRemoval = .doNothing) throws {
         guard let header = self.getBytes(at: headerOffset, length: offset - headerOffset) else { throw Errors.InvalidPacket }
-        guard let ciphertext = self.getBytes(at: offset, length: packetLength - packetNumber.count) else { print("Not enough ciphertext bytes: Offset: \(offset), Length: \(packetLength), Bytes Available: \(self.readableBytes)"); throw Errors.InvalidPacket }
+        guard let ciphertext = self.getBytes(at: offset, length: packetLength - packetNumber.count) else { throw Errors.InvalidPacket }
 
         let plaintext = try opener.decryptPayload(cipherText: ciphertext, packetNumber: packetNumber, unprotectedHeaderBytes: header)
 
@@ -148,16 +148,11 @@ extension ByteBuffer {
     /// - returns: A `[UInt8]` value containing the `CryptoFrame`s bytes or `nil` if there wasn't a valid frame available.
     //@inlinable
     public mutating func readQuicCryptoFrame() -> [UInt8]? {
-        guard self.getBytes(at: self.readerIndex, length: 1) == [0x06] else { print("ReadQuicCryptoFrame::Invalid Frame Type"); return nil }
-        guard let offset = self.getQuicVarInt(at: self.readerIndex + 1) else { print("ReadQuicCryptoFrame::Failed to get Offset"); return nil }
-        print("QuicCryptoFrame::Offset Bytes \(offset.length)")
-        guard let length = self.getQuicVarInt(at: self.readerIndex + offset.length + 1) else { print("ReadQuicCryptoFrame::Failed to get Length"); return nil }
-        print("QuicCryptoFrame::Length Bytes \(length.length)")
+        guard self.getBytes(at: self.readerIndex, length: 1) == [0x06] else { return nil }
+        guard let offset = self.getQuicVarInt(at: self.readerIndex + 1) else { return nil }
+        guard let length = self.getQuicVarInt(at: self.readerIndex + offset.length + 1) else { return nil }
         let bytesToConsume = 1 + offset.length + length.length + Int(length.value)
-        guard let result = self.getBytes(at: self.readerIndex, length: bytesToConsume) else {
-            print("QuicCryptoFrame::Not enough bytes available")
-            return nil
-        }
+        guard let result = self.getBytes(at: self.readerIndex, length: bytesToConsume) else { return nil }
         self.moveReaderIndex(forwardBy: bytesToConsume)
         return result
     }
@@ -165,9 +160,7 @@ extension ByteBuffer {
     public mutating func readQuicCryptoFrameContents() -> [UInt8]? {
         guard self.getBytes(at: self.readerIndex, length: 1) == [0x06] else { return nil }
         guard let offset = self.getQuicVarInt(at: self.readerIndex + 1) else { return nil }
-        print("QuicCryptoFrame::Offset Bytes \(offset.length)")
         guard let length = self.getQuicVarInt(at: self.readerIndex + offset.length + 1) else { return nil }
-        print("QuicCryptoFrame::Length Bytes \(length.length)")
         let frameHeaderLength = 1 + offset.length + length.length
         let framePayloadLength = Int(length.value)
         guard let result = self.getBytes(at: self.readerIndex + frameHeaderLength, length: framePayloadLength) else {
@@ -271,15 +264,15 @@ extension ByteBuffer {
         //print("Payload: \(opened.payload.hexString)")
         var headerBuf = ByteBuffer(bytes: opened.header)
         guard let firstByte = headerBuf.readBytes(length: 1)?.first, LongPacketType(rawValue: firstByte & LongPacketType.mask) == .initial else { return nil }
-        guard let version = headerBuf.readVersion() else { print("Failed to consume Version from Header"); return nil }
-        guard let dcid = headerBuf.readConnectionID() else { print("Failed to consume DCID from Header"); return nil }
-        guard let scid = headerBuf.readConnectionID() else { print("Failed to consume SCID from Header"); return nil }
-        guard let token = headerBuf.readQuicVarIntLengthPrefixedBytes() else { print("Failed to consume Token from Header"); return nil }
-        guard let packetLength = headerBuf.readQuicVarInt() else { print("Failed to consume PacketLength from Header"); return nil }
-        guard let packetNumber = headerBuf.readBytes(length: headerBuf.readableBytes) else { print("Failed to consume PacketNumber from Header"); return nil }
+        guard let version = headerBuf.readVersion() else { return nil }
+        guard let dcid = headerBuf.readConnectionID() else { return nil }
+        guard let scid = headerBuf.readConnectionID() else { return nil }
+        guard let token = headerBuf.readQuicVarIntLengthPrefixedBytes() else { return nil }
+        guard let packetLength = headerBuf.readQuicVarInt() else { return nil }
+        guard let packetNumber = headerBuf.readBytes(length: headerBuf.readableBytes) else { return nil }
 
         let initialHeader = InitialHeader(version: version, destinationID: dcid, sourceID: scid, token: token, packetNumber: packetNumber)
-        guard let frames = try? opened.payload.parsePayloadIntoFrames() else { print("Failed to parse payload into Frames"); return nil }
+        guard let frames = try? opened.payload.parsePayloadIntoFrames() else { return nil }
         let initialPacket = InitialPacket(header: initialHeader, payload: frames.frames)
 
         self.moveReaderIndex(forwardBy: totalPacketLength)
@@ -292,7 +285,7 @@ extension ByteBuffer {
     //@inlinable
     mutating func readEncryptedQuicHandshakePacket(using keys: PacketProtector) -> HandshakePacket? {
         // Grab the first byte
-        guard let protectedFirstByte = self.getBytes(at: self.readerIndex, length: 1)?.first else { print("No bytes available to Read"); return nil }
+        guard let protectedFirstByte = self.getBytes(at: self.readerIndex, length: 1)?.first else { return nil }
         // Ensure the first byte indicates that this is an Initial Packet Type
         guard LongPacketType(rawValue: protectedFirstByte & LongPacketType.mask) == .handshake else { print("Not a HandshakePacket"); return nil }
         do {
@@ -300,62 +293,56 @@ extension ByteBuffer {
             let (pno, totalPacketLength) = try self.getLongHeaderPacketNumberOffsetAndTotalLength()
             //print("Packet Number Offset: \(pno)")
             //print("Total Packet Length: \(totalPacketLength)")
-            guard let bytes = self.getBytes(at: self.readerIndex, length: totalPacketLength) else { print("Not Enough Bytes Available"); return nil }
+            guard let bytes = self.getBytes(at: self.readerIndex, length: totalPacketLength) else { return nil }
 
             let opened = try keys.open(bytes: bytes, packetNumberOffset: pno)
-            print("Decrypted HandshakePacket")
-            print("Header: \(opened.header.hexString)")
-            print("Payload: \(opened.payload.hexString)")
+            // decrypted handshake packet
             var headerBuf = ByteBuffer(bytes: opened.header)
-            guard let firstByte = headerBuf.readBytes(length: 1)?.first, LongPacketType(rawValue: firstByte & LongPacketType.mask) == .handshake else { print("Not a HandshakePacket"); return nil }
-            guard let version = headerBuf.readVersion() else { print("Failed to consume Version from Header"); return nil }
-            guard let dcid = headerBuf.readConnectionID() else { print("Failed to consume DCID from Header"); return nil }
-            guard let scid = headerBuf.readConnectionID() else { print("Failed to consume SCID from Header"); return nil }
-            guard let packetLength = headerBuf.readQuicVarInt() else { print("Failed to consume PacketLength from Header"); return nil }
-            guard let packetNumber = headerBuf.readBytes(length: headerBuf.readableBytes) else { print("Failed to consume PacketNumber from Header"); return nil }
+        guard let firstByte = headerBuf.readBytes(length: 1)?.first, LongPacketType(rawValue: firstByte & LongPacketType.mask) == .handshake else { return nil }
+        guard let version = headerBuf.readVersion() else { return nil }
+        guard let dcid = headerBuf.readConnectionID() else { return nil }
+        guard let scid = headerBuf.readConnectionID() else { return nil }
+        guard let packetLength = headerBuf.readQuicVarInt() else { return nil }
+        guard let packetNumber = headerBuf.readBytes(length: headerBuf.readableBytes) else { return nil }
 
             let handshakeHeader = HandshakeHeader(version: version, destinationID: dcid, sourceID: scid, packetNumber: packetNumber)
-            guard let frames = try? opened.payload.parsePayloadIntoFrames() else { print("Failed to parse payload into Frames"); return nil }
+            guard let frames = try? opened.payload.parsePayloadIntoFrames() else { return nil }
             let handshakePacket = HandshakePacket(header: handshakeHeader, payload: frames.frames)
 
             self.moveReaderIndex(forwardBy: totalPacketLength)
             return handshakePacket
         } catch {
-            print("Failed to read and decrypt handshake packet: \(error)")
             return nil
         }
     }
 
     mutating func readEncryptedQuicTrafficPacket(dcid: ConnectionID, using keys: PacketProtector) -> ShortPacket? {
         // Grab the first byte
-        guard let protectedFirstByte = self.getBytes(at: self.readerIndex, length: 1)?.first else { print("No bytes available to Read"); return nil }
+        guard let protectedFirstByte = self.getBytes(at: self.readerIndex, length: 1)?.first else { return nil }
         // Ensure the first byte indicates that this is an Initial Packet Type
-        guard HeaderForm(rawValue: protectedFirstByte & HeaderForm.mask) == .short else { print("Not a Traffic Packet"); return nil }
+        guard HeaderForm(rawValue: protectedFirstByte & HeaderForm.mask) == .short else { return nil }
         do {
             // Get the Packet Length
             let pno = 1 + dcid.length
             //print("Packet Number Offset: \(pno)")
-            guard let bytes = self.getBytes(at: self.readerIndex, length: self.readableBytes) else { print("Not Enough Bytes Available"); return nil }
+            guard let bytes = self.getBytes(at: self.readerIndex, length: self.readableBytes) else { return nil }
 
             let opened = try keys.open(bytes: bytes, packetNumberOffset: pno)
             //print("Decrypted TrafficPacket")
             //print("Header: \(opened.header.hexString)")
             //print("Payload: \(opened.payload.hexString)")
             var headerBuf = ByteBuffer(bytes: opened.header)
-            guard let firstByte = headerBuf.readBytes(length: 1)?.first, HeaderForm(rawValue: firstByte & HeaderForm.mask) == .short else { print("Not a TrafficPacket"); return nil }
-            guard dcid.rawValue == headerBuf.readBytes(length: dcid.length) else { print("Failed to consume DCID from Header"); return nil }
-            guard let packetNumber = headerBuf.readBytes(length: headerBuf.readableBytes) else { print("Failed to consume PacketNumber from Header"); return nil }
+            guard let firstByte = headerBuf.readBytes(length: 1)?.first, HeaderForm(rawValue: firstByte & HeaderForm.mask) == .short else { return nil }
+            guard dcid.rawValue == headerBuf.readBytes(length: dcid.length) else { return nil }
+            guard let packetNumber = headerBuf.readBytes(length: headerBuf.readableBytes) else { return nil }
 
             let shortHeader = GenericShortHeader(firstByte: firstByte, id: dcid, packetNumber: packetNumber)
-            guard let frames = try? opened.payload.parsePayloadIntoFrames() else { print("Failed to parse payload into Frames"); return nil }
+            guard let frames = try? opened.payload.parsePayloadIntoFrames() else { return nil }
             let shortPacket = ShortPacket(header: shortHeader, payload: frames.frames)
 
             self.moveReaderIndex(forwardBy: self.readableBytes)
             return shortPacket
-        } catch {
-            print("Failed to read and decrypt traffic packet: \(error)")
-            return nil
-        }
+        } catch { return nil }
     }
 }
 
@@ -400,20 +387,20 @@ extension ByteBuffer {
     }
 
     func getLongHeaderPacketNumberOffsetAndTotalLength() throws -> (pno: Int, totalPacketLength: Int) {
-        guard let firstByte = self.getBytes(at: self.readerIndex, length: 1)?.first else { print("PNO+TotalLength::Failed to read first byte"); throw Errors.InvalidPacket }
-        guard let type = LongPacketType(rawValue: firstByte & LongPacketType.mask) else { print("PNO+TotalLength::Failed to determine packet type"); throw Errors.InvalidPacket }
+        guard let firstByte = self.getBytes(at: self.readerIndex, length: 1)?.first else { throw Errors.InvalidPacket }
+        guard let type = LongPacketType(rawValue: firstByte & LongPacketType.mask) else { throw Errors.InvalidPacket }
         var tempReaderIndex: Int = self.readerIndex + 5 // First Byte and 4 Byte Version
-        guard let dcidLength = self.getVarIntPrefixedBytesCount(at: tempReaderIndex) else { print("PNO+TotalLength::Failed to read dcid"); throw Errors.InvalidPacket }
+        guard let dcidLength = self.getVarIntPrefixedBytesCount(at: tempReaderIndex) else { throw Errors.InvalidPacket }
         tempReaderIndex += dcidLength
-        guard let scidLength = self.getVarIntPrefixedBytesCount(at: tempReaderIndex) else { print("PNO+TotalLength::Failed to read scid"); throw Errors.InvalidPacket }
+        guard let scidLength = self.getVarIntPrefixedBytesCount(at: tempReaderIndex) else { throw Errors.InvalidPacket }
         tempReaderIndex += scidLength
         // If Initial, then read the token
         if type == .initial {
-            guard let tokenLength = self.getVarIntPrefixedBytesCount(at: tempReaderIndex) else { print("PNO+TotalLength::Failed to read token length"); throw Errors.InvalidPacket }
+            guard let tokenLength = self.getVarIntPrefixedBytesCount(at: tempReaderIndex) else { throw Errors.InvalidPacket }
             tempReaderIndex += tokenLength
         }
         // Read Packet Length
-        guard let packetLength = self.getQuicVarInt(at: tempReaderIndex) else { print("PNO+TotalLength::Failed to read packetLength"); throw Errors.InvalidPacket }
+        guard let packetLength = self.getQuicVarInt(at: tempReaderIndex) else { throw Errors.InvalidPacket }
         tempReaderIndex += packetLength.length
 
         // Now remove the original offset...
@@ -1132,7 +1119,6 @@ extension ByteBuffer {
                         guard let hd = self.readHandshakeDoneFrame() else { break readLoop }
                         frames.append(hd)
                     default:
-                        print("TODO::Handle Frame Type: \([firstByte].hexString)")
                         leftoverBytes = self.readSlice(length: self.readableBytes)
                         break readLoop
                 }

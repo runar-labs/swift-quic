@@ -30,7 +30,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
     private var storedContext: ChannelHandlerContext!
 
     private let remoteAddress: SocketAddress
-    private let logger = Logger(label: "quic.packetprotector")
+    private let log = Logger(label: "quic.packetprotector")
 
     private var canFlushHandshakeBuffer: Bool = false {
         didSet { if self.canFlushHandshakeBuffer && self.encryptedHandshakeBuffer.readableBytes > 0 && self.handshakeKeys.opener != nil { self.decryptAndFlushHandshakeBuffer() } }
@@ -68,7 +68,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let envelope = self.unwrapInboundIn(data)
-        logger.trace("inbound datagram", metadata: ["size": .stringConvertible(envelope.data.readableBytes)])
+        log.trace("inbound datagram", metadata: ["size": .stringConvertible(envelope.data.readableBytes)])
         //print(envelope.data.readableBytesView.hexString)
 
         // TODO: We should be comparing DCID here, or we just trust the Muxer to do it's job and operate on ByteBuffers instead of AddressedEnvelopes.
@@ -95,7 +95,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
                     packet = p
                 case .Handshake:
                     guard self.handshakeKeys.opener != nil else {
-                        logger.debug("buffering handshake packet: keys not yet available")
+                        log.debug("buffering handshake packet: keys not yet available")
                         guard let (_, totalPacketLength) = try? buffer.getLongHeaderPacketNumberOffsetAndTotalLength() else {
                             context.fireErrorCaught(Errors.InvalidPacket)
                             break
@@ -114,7 +114,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
                     packet = p
                 case .Short:
                     guard self.trafficKeys.opener != nil else {
-                        logger.debug("buffering traffic packet: keys not yet available")
+                        log.debug("buffering traffic packet: keys not yet available")
                         self.encryptedTrafficBuffer.writeBuffer(&buffer)
                         break
                     }
@@ -134,7 +134,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
         }
 
         // Send each packet along the pipeline
-        logger.trace("decoded packets", metadata: ["count": .stringConvertible(packetsToProcess.count)])
+        log.trace("decoded packets", metadata: ["count": .stringConvertible(packetsToProcess.count)])
         packetsToProcess.forEach { packet in
             context.fireChannelRead(self.wrapInboundOut(packet))
         }
@@ -152,7 +152,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
         var datagramPayload = ByteBuffer()
 
         packets.forEach { packet in
-            logger.trace("encrypting packet", metadata: ["type": .string(String(describing: PacketType(packet.header.firstByte)))])
+            log.trace("encrypting packet", metadata: ["type": .string(String(describing: PacketType(packet.header.firstByte)))])
 
             do {
                 let enc: (protectedHeader: [UInt8], encryptedPayload: [UInt8])
@@ -176,20 +176,20 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
         }
 
         let datagram = AddressedEnvelope(remoteAddress: remoteAddress, data: datagramPayload)
-        logger.trace("sending datagram", metadata: ["size": .stringConvertible(datagramPayload.readableBytes)])
+        log.trace("sending datagram", metadata: ["size": .stringConvertible(datagramPayload.readableBytes)])
         context.writeAndFlush(self.wrapOutboundOut(datagram), promise: promise)
     }
 
     // This function should be called by our StateHandler
     public func installHandshakeKeys(secret: [UInt8], for mode: EndpointRole, cipherSuite: CipherSuite = .AESGCM128_SHA256) {
         // Given the handshake secret generate the necessary keys for Handshake Packet Protection
-        logger.debug("install handshake keys", metadata: ["mode": .string(String(describing: mode))])
+        log.debug("install handshake keys", metadata: ["mode": .string(String(describing: mode))])
 
         // Install the keys
         do {
             try self.handshakeKeys.installKeySet(suite: cipherSuite, secret: secret, for: mode, ourPerspective: self.perspective)
             if self.canFlushHandshakeBuffer && mode != self.perspective {
-                logger.trace("attempting to read buffered handshake packets")
+                log.trace("attempting to read buffered handshake packets")
                 self.decryptAndFlushHandshakeBuffer()
             }
         } catch {
@@ -200,13 +200,13 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
     // This function should be called by our StateHandler
     public func installTrafficKeys(secret: [UInt8], for mode: EndpointRole, cipherSuite: CipherSuite = .ChaChaPoly_SHA256) {
         // Given the traffic secret generate the necessary keys for Traffic Packet Protection
-        logger.debug("install traffic keys", metadata: ["mode": .string(String(describing: mode))])
+        log.debug("install traffic keys", metadata: ["mode": .string(String(describing: mode))])
 
         // Install the keys
         do {
             try self.trafficKeys.installKeySet(suite: cipherSuite, secret: secret, for: mode, ourPerspective: self.perspective)
             if self.canFlushTrafficBuffer && mode != self.perspective {
-                logger.trace("attempting to read buffered traffic packets")
+                log.trace("attempting to read buffered traffic packets")
                 self.decryptAndFlushTrafficBuffer()
             }
         } catch {
@@ -233,27 +233,27 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
     }
 
     private func decryptAndFlushHandshakeBuffer() {
-        logger.trace("flush buffered handshake packets")
+        log.trace("flush buffered handshake packets")
         while self.encryptedHandshakeBuffer.readableBytes > 0 {
             guard let packet = encryptedHandshakeBuffer.readEncryptedQuicHandshakePacket(using: self.handshakeKeys) else {
-                logger.warning("failed to decrypt buffered handshake packet")
+                log.warning("failed to decrypt buffered handshake packet")
                 self.storedContext.fireErrorCaught(Errors.InvalidPacket)
                 break
             }
-            logger.trace("flushing one buffered handshake packet")
+            log.trace("flushing one buffered handshake packet")
             self.storedContext.fireChannelRead(self.wrapInboundOut(packet))
         }
     }
 
     private func decryptAndFlushTrafficBuffer() {
-        logger.trace("flush buffered traffic packets")
+        log.trace("flush buffered traffic packets")
         while self.encryptedTrafficBuffer.readableBytes > 0 {
             guard let packet = encryptedTrafficBuffer.readEncryptedQuicTrafficPacket(dcid: self.scid, using: self.trafficKeys) else {
-                logger.warning("failed to decrypt buffered traffic packet")
+                log.warning("failed to decrypt buffered traffic packet")
                 self.storedContext.fireErrorCaught(Errors.InvalidPacket)
                 break
             }
-            logger.trace("flushing one buffered traffic packet")
+            log.trace("flushing one buffered traffic packet")
             self.storedContext.fireChannelRead(self.wrapInboundOut(packet))
         }
     }
@@ -273,7 +273,7 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
 
             // Inject the padding into our initial packet so it gets encrypted
             initialPacket.payload.insert(padding, at: 0)
-            logger.trace("padding initial packet", metadata: ["pad": .stringConvertible(1248 - estimatedLength)])
+            log.trace("padding initial packet", metadata: ["pad": .stringConvertible(1248 - estimatedLength)])
 
             // Update the packet in our packet array
             packets[initialPacketIndex] = initialPacket
@@ -299,6 +299,7 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
     private var storedContext: ChannelHandlerContext!
 
     private let remoteAddress: SocketAddress
+    private let log = Logger(label: "quic.packetprotector2")
 
     private var canFlushHandshakeBuffer: Bool = false {
         didSet { if self.canFlushHandshakeBuffer && self.encryptedHandshakeBuffer.readableBytes > 0 && self.handshakeKeys.opener != nil { self.decryptAndFlushHandshakeBuffer() } }
@@ -337,7 +338,7 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = self.unwrapInboundIn(data)
 
-        print("PacketProtectorHandler::ChannelRead::Envelope: \(buffer.readableBytesView.hexString)")
+        log.trace("inbound buffer", metadata: ["size": .stringConvertible(buffer.readableBytes)])
 
         // Read the packets
         var packetsToProcess: [any Packet] = []
@@ -349,38 +350,44 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
             switch PacketType(firstByte) {
                 case .Initial:
                     guard let p = buffer.readEncryptedQuicInitialPacket(using: initialKeys) else {
-                        fatalError("PacketProtectorHandler::ChannelRead::Failed to decrypt initial packet")
+                        context.fireErrorCaught(Errors.InvalidPacket)
+                        break
                     }
                     packet = p
                 case .Handshake:
                     guard self.handshakeKeys.opener != nil else {
-                        print("PacketProtectorHandler::ChannelRead::Handshake Keys Not Available Yet! Buffering Handshake Packet")
+                        log.debug("buffering handshake packet: keys not yet available")
                         guard let (_, totalPacketLength) = try? buffer.getLongHeaderPacketNumberOffsetAndTotalLength() else {
-                            fatalError("PacketProtectorHandler::ChannelRead::Failed to fetch PNO and Length for Encrypted Handshake Packet")
+                            context.fireErrorCaught(Errors.InvalidPacket)
+                            break
                         }
                         guard var encryptedPacket = buffer.readSlice(length: totalPacketLength) else {
-                            fatalError("PacketProtectorHandler::ChannelRead::Failed to fetch PNO and Length for Encrypted Handshake Packet")
+                            context.fireErrorCaught(Errors.InvalidPacket)
+                            break
                         }
                         self.encryptedHandshakeBuffer.writeBuffer(&encryptedPacket)
                         break
                     }
                     guard let p = buffer.readEncryptedQuicHandshakePacket(using: handshakeKeys) else {
-                        fatalError("PacketProtectorHandler::ChannelRead::Failed to decrypt handshake packet")
+                        context.fireErrorCaught(Errors.InvalidPacket)
+                        break
                     }
                     packet = p
                 case .Short:
                     guard self.trafficKeys.opener != nil else {
-                        print("PacketProtectorHandler::ChannelRead::Traffic Keys Not Available Yet! Buffering Traffic Packet")
+                        log.debug("buffering traffic packet: keys not yet available")
                         self.encryptedTrafficBuffer.writeBuffer(&buffer)
                         break
                     }
                     guard let p = buffer.readEncryptedQuicTrafficPacket(dcid: scid, using: trafficKeys) else {
-                        fatalError("PacketProtectorHandler::ChannelRead::Failed to decrypt traffic packet")
+                        context.fireErrorCaught(Errors.InvalidPacket)
+                        break
                     }
                     packet = p
 
                 default:
-                    fatalError("PacketProtectorHandler::ChannelRead::TODO:Handle Packet Type: \(PacketType(firstByte)!)")
+                    context.fireErrorCaught(Errors.InvalidPacket)
+                    break
             }
             if let packet {
                 packetsToProcess.append(packet)
@@ -388,10 +395,9 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
         }
 
         // Send each packet along the pipeline
-        print("PacketProtectorHandler::ChannelRead::We have \(packetsToProcess.count) Packets that need to be processed...")
+        log.trace("decoded packets", metadata: ["count": .stringConvertible(packetsToProcess.count)])
         packetsToProcess.forEach { packet in
-            print("PacketProtectorHandler::ChannelRead::Packet: \(packet.header)")
-            print("PacketProtectorHandler::ChannelRead::Payload: \(packet.serializedPayload.hexString)")
+            log.trace("packet", metadata: ["type": .string(String(describing: PacketType(packet.header.firstByte))), "payload": .string(packet.serializedPayload.hexString)])
             context.fireChannelRead(self.wrapInboundOut(packet))
         }
 
@@ -408,10 +414,9 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
         var datagramPayload = ByteBuffer()
 
         for packet in packets {
-            guard !packet.payload.isEmpty else { print("PacketProtectorHandler::Write::Dropping Empty Outbound Packet"); continue }
+            guard !packet.payload.isEmpty else { log.debug("dropping empty outbound packet"); continue }
 
-            print("PacketProtectorHandler::Write::Encrypting Packet")
-            print("PacketProtectorHandler::Write::\(packet)")
+            log.trace("encrypting packet", metadata: ["type": .string(String(describing: PacketType(packet.header.firstByte)))])
 
             do {
                 let enc: (protectedHeader: [UInt8], encryptedPayload: [UInt8])
@@ -424,32 +429,31 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
                         enc = try (packet as! ShortPacket).seal(using: self.trafficKeys)
                     default:
                         context.fireErrorCaught(Errors.InvalidPacket)
-                        fatalError("PacketProtectorhandler::Write::Handle Packet Type \(PacketType(packet.header.firstByte)!)")
+                        return
                 }
                 datagramPayload.writeBytes(enc.protectedHeader)
                 datagramPayload.writeBytes(enc.encryptedPayload)
             } catch {
-                fatalError("Failed to encrypt packet `\(error)`")
+                context.fireErrorCaught(error)
+                return
             }
         }
 
         //let datagram = AddressedEnvelope(remoteAddress: remoteAddress, data: datagramPayload)
-        print("PacketProtectorHandler::Write::Sending Datagram")
-        print("PacketProtectorHandler::Write::\(datagramPayload.readableBytesView.hexString)")
+        log.trace("sending datagram", metadata: ["size": .stringConvertible(datagramPayload.readableBytes)])
         context.writeAndFlush(self.wrapOutboundOut(datagramPayload), promise: promise)
     }
 
     // This function should be called by our StateHandler
     public func installHandshakeKeys(secret: [UInt8], for mode: EndpointRole, cipherSuite: CipherSuite = .AESGCM128_SHA256) {
         // Given the handshake secret generate the necessary keys for Handshake Packet Protection
-        print("PacketProtectorHandler::InstallHandshakeKeys:: 🔐 Generating and Installing \(mode) Key Set for Handshake Packet Protection 🔐")
-        print("PacketProtectorHandler::InstallHandshakeKeys::Using Secret: \(secret.hexString)")
+        log.debug("install handshake keys", metadata: ["mode": .string(String(describing: mode))])
 
         // Install the keys
         do {
             try self.handshakeKeys.installKeySet(suite: cipherSuite, secret: secret, for: mode, ourPerspective: self.perspective)
             if self.canFlushHandshakeBuffer && mode != self.perspective {
-                print("PacketProtectorHandler::InstallHandshakeKeys::Attempting to Read Buffered Handshake Packets...")
+                log.trace("attempting to read buffered handshake packets")
                 self.decryptAndFlushHandshakeBuffer()
             }
         } catch {
@@ -460,14 +464,13 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
     // This function should be called by our StateHandler
     public func installTrafficKeys(secret: [UInt8], for mode: EndpointRole, cipherSuite: CipherSuite = .ChaChaPoly_SHA256) {
         // Given the traffic secret generate the necessary keys for Traffic Packet Protection
-        print("PacketProtectorHandler::InstallTrafficKeys:: 🔐 Generating and Installing \(mode) Key Set for Traffic Packet Protection 🔐")
-        print("PacketProtectorHandler::InstallTrafficKeys::Using Secret: \(secret.hexString)")
+        log.debug("install traffic keys", metadata: ["mode": .string(String(describing: mode))])
 
         // Install the keys
         do {
             try self.trafficKeys.installKeySet(suite: cipherSuite, secret: secret, for: mode, ourPerspective: self.perspective)
             if self.canFlushTrafficBuffer && mode != self.perspective {
-                print("PacketProtectorHandler::InstallTrafficKeys::Attempting to Read Buffered Traffic Packets...")
+                log.trace("attempting to read buffered traffic packets")
                 self.decryptAndFlushTrafficBuffer()
             }
         } catch {
@@ -494,27 +497,27 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
     }
 
     private func decryptAndFlushHandshakeBuffer() {
-        print("PacketProtectorHandler::DecryptAndFlushHandshakeBuffer")
+        log.trace("flush buffered handshake packets")
         while self.encryptedHandshakeBuffer.readableBytes > 0 {
             guard let packet = encryptedHandshakeBuffer.readEncryptedQuicHandshakePacket(using: self.handshakeKeys) else {
-                print("PacketProtectorHandler::DecryptAndFlushHandshakeBuffer::Failed to Decrypt Buffered Handshake Packet")
+                log.warning("failed to decrypt buffered handshake packet")
                 self.storedContext.fireErrorCaught(Errors.InvalidPacket)
                 break
             }
-            print("PacketProtectorHandler::DecryptAndFlushHandshakeBuffer::Flushing Buffer Handshake Packet")
+            log.trace("flushing one buffered handshake packet")
             self.storedContext.fireChannelRead(self.wrapInboundOut(packet))
         }
     }
 
     private func decryptAndFlushTrafficBuffer() {
-        print("PacketProtectorHandler::DecryptAndFlushTrafficBuffer")
+        log.trace("flush buffered traffic packets")
         while self.encryptedTrafficBuffer.readableBytes > 0 {
             guard let packet = encryptedTrafficBuffer.readEncryptedQuicTrafficPacket(dcid: self.scid, using: self.trafficKeys) else {
-                print("PacketProtectorHandler::DecryptAndFlushTrafficBuffer::Failed to Decrypt Buffered Traffic Packet")
+                log.warning("failed to decrypt buffered traffic packet")
                 self.storedContext.fireErrorCaught(Errors.InvalidPacket)
                 break
             }
-            print("PacketProtectorHandler::DecryptAndFlushTrafficBuffer::Flushing Buffer Traffic Packet")
+            log.trace("flushing one buffered traffic packet")
             self.storedContext.fireChannelRead(self.wrapInboundOut(packet))
         }
     }
@@ -522,21 +525,21 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
     private func padDatagramIfNecessary(packets: inout [any Packet]) {
         // If the outbound datagram includes an InitialPacket, it needs to be padded to at least 1200 bytes
         if let initialPacketIndex = packets.firstIndex(where: { $0 as? InitialPacket != nil }) {
-            guard var initialPacket = packets[initialPacketIndex] as? InitialPacket else { fatalError("PacketProtectorHandler::PadDatagramIfNecessary::InitialPacket turned out to not be an initial packet...") }
+            guard var initialPacket = packets[initialPacketIndex] as? InitialPacket else { self.storedContext.fireErrorCaught(Errors.InvalidPacket); return }
             // Get the total estimated bytes for all the packets
             var estimatedLength = 0
             for packet in packets {
                 estimatedLength += packet.headerBytes.count + packet.serializedPayload.count + 16
             }
 
-            guard estimatedLength < 1248 else { print("PacketProtectorHandler::PadDatagramIfNecessary::Warning::Packet payload exceeds 1248 bytes"); return }
+            guard estimatedLength < 1248 else { log.warning("packet payload exceeds 1248 bytes; not padding initial packet", metadata: ["bytes": .stringConvertible(estimatedLength)]) ; return }
 
             // Construct our Padding Frame of appropriate length
             let padding = Frames.Padding(length: 1248 - estimatedLength)
 
             // Inject the padding into our initial packet so it gets encrypted
             initialPacket.payload.insert(padding, at: 0)
-            print("PacketProtectorHandler::PadDatagramIfNecessary::Adding \(1248 - estimatedLength) bytes of padding to our initial packet")
+            log.trace("padding initial packet", metadata: ["pad": .stringConvertible(1248 - estimatedLength)])
 
             // Update the packet in our packet array
             packets[initialPacketIndex] = initialPacket

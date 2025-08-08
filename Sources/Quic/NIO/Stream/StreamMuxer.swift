@@ -14,39 +14,39 @@
 
 import Atomics
 import NIOCore
+import Logging
 
 final class StreamStateHandler: ChannelInboundHandler {
+    private let logger = Logger(label: "quic.stream.state")
     public typealias InboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
 
     func handlerAdded(context: ChannelHandlerContext) {
-        print("StreamStateHandler::Added")
+        self.logger.trace("handler added")
         if let chan = context.channel as? QuicStreamChannel {
-            print("Got our StreamID::\(chan.streamID)")
+            self.logger.debug("stream id", metadata: ["id": .string(String(describing: chan.streamID))])
         }
     }
 
     func handlerRemoved(context: ChannelHandlerContext) {
-        print("StreamStateHandler::Removed")
+        self.logger.trace("handler removed")
     }
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        print("StreamStateHandler::ChannelRead")
+        self.logger.trace("channel read")
         let buf = self.unwrapInboundIn(data)
-        print("StreamStateHandler::Got Message `\(buf.getString(at: buf.readerIndex, length: buf.readableBytes) ?? "")`")
+        self.logger.trace("message", metadata: ["msg": .stringConvertible(buf.getString(at: buf.readerIndex, length: buf.readableBytes) ?? "")])
     }
 
     public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
-        print("StreamStateHandler::Write")
+        self.logger.trace("write")
     }
 
     private func sendGoodbye(context: ChannelHandlerContext) {
-        print("StreamStateHandler::Sending `Goodbyte`")
+        self.logger.debug("sending goodbye")
         // Lets send "goodbye"
         let promise = context.eventLoop.makePromise(of: Void.self)
-        promise.futureResult.whenComplete { result in
-            print("StreamStateHandler::Done Writing Goodbyte")
-        }
+        promise.futureResult.whenComplete { _ in self.logger.trace("done writing goodbye") }
         context.writeAndFlush(
             self.wrapOutboundOut(
                 ByteBuffer(string: "Goodbyte")
@@ -68,6 +68,7 @@ final class QuicStreamMultiplexer: ChannelInboundHandler, ChannelOutboundHandler
     private var context: ChannelHandlerContext!
     private var didReadChannels: StreamChannelList = StreamChannelList()
     private var flushState: FlushState = .notReading
+    private let logger = Logger(label: "quic.stream.mux")
 
     public init(channel: Channel, inboundStreamInitializer initializer: ((Channel) -> EventLoopFuture<Void>)?) {
         self.channel = channel
@@ -77,11 +78,11 @@ final class QuicStreamMultiplexer: ChannelInboundHandler, ChannelOutboundHandler
     public func handlerAdded(context: ChannelHandlerContext) {
         // We now need to check that we're on the same event loop as the one we were originally given.
         // If we weren't, this is a hard failure, as there is a thread-safety issue here.
-        print("QuicStreamMultiplexer::HandlerAdded")
+        self.logger.trace("handler added")
         self.channel.eventLoop.preconditionInEventLoop()
         self.context = context
         if self.channel.isActive {
-            print("Attempting to open Stream")
+            self.logger.debug("attempting to open stream")
             let messageToSend = "Hello from swift-quic!"
             let newStream = Frames.Stream(streamID: StreamID(rawValue: VarInt(integerLiteral: 0)), offset: VarInt(integerLiteral: 0), length: VarInt(integerLiteral: UInt64(messageToSend.count)), fin: true, data: ByteBuffer(string: messageToSend))
             var buffer = ByteBuffer()
@@ -95,7 +96,7 @@ final class QuicStreamMultiplexer: ChannelInboundHandler, ChannelOutboundHandler
     }
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        print("QuicStreamMultiplexer::ChannelRead")
+        self.logger.trace("channel read")
         var buffer = unwrapInboundIn(data)
 
         guard let frame = buffer.readStreamFrame() else {
@@ -104,14 +105,14 @@ final class QuicStreamMultiplexer: ChannelInboundHandler, ChannelOutboundHandler
             return
         }
 
-        print("Stream Data \(frame.data.readableBytesView.hexString)")
+        self.logger.trace("stream data", metadata: ["buf": .string(frame.data.readableBytesView.hexString)])
 
         self.flushState.startReading()
 
         // Mux on StreamID
         if let channel = streams[frame.streamID] {
             // Forward the data along
-            print("Forwarding data")
+            self.logger.trace("forwarding data to child stream")
             channel.receiveInboundFrame(frame.data)
 
             if !channel.inList {
@@ -120,7 +121,7 @@ final class QuicStreamMultiplexer: ChannelInboundHandler, ChannelOutboundHandler
         } else {
             // Open a new stream
             // TODO: Is this a new stream frame?
-            print("Opening new Stream for \(frame.streamID)")
+            self.logger.info("opening new stream", metadata: ["id": .string(String(describing: frame.streamID))])
             let channel = QuicStreamChannel(allocator: self.channel.allocator, parent: self.channel, multiplexer: self, streamID: frame.streamID)
             self.streams[frame.streamID] = channel
 
@@ -161,7 +162,6 @@ final class QuicStreamMultiplexer: ChannelInboundHandler, ChannelOutboundHandler
 
     public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         /* for now just forward */
-        print("TODO: Handle Write!")
         context.write(self.wrapOutboundOut(self.unwrapOutboundIn(data)), promise: promise)
     }
 
@@ -218,14 +218,13 @@ extension QuicStreamMultiplexer {
 
 extension QuicStreamMultiplexer {
     internal func childChannelClosed(id: StreamID) {
-        print("QuicStreamMultiplexer: Closing Child Channel Stream with ID: \(id)")
+        self.logger.debug("closing child stream", metadata: ["id": .string(String(describing: id))])
         self.streams.removeValue(forKey: id)
     }
 
     // TODO: Fixme
     internal func childChannelWrite(_ frame: Frames.Stream, promise: EventLoopPromise<Void>?) {
-        print("ChildChannelWrite::FIXME::\(frame.data.readableBytesView.hexString)")
-        print(frame)
+        self.logger.trace("child channel write", metadata: ["buf": .string(frame.data.readableBytesView.hexString), "frame": .string(String(describing: frame))])
         var buf = ByteBuffer()
         frame.encode(into: &buf)
         self.context.write(self.wrapOutboundOut(buf), promise: promise)
@@ -269,7 +268,10 @@ private enum StreamChannelState {
             case .remoteActive:
                 self = .active
             case .localActive, .active, .closing, .closingNeverActivated, .closed:
-                preconditionFailure("Became active from state \(self)")
+#if DEBUG
+                assertionFailure("Became active from state \(self)")
+#endif
+                return
         }
     }
 
@@ -280,9 +282,15 @@ private enum StreamChannelState {
             case .localActive:
                 self = .active
             case .closed:
-                preconditionFailure("Stream must be reset on network activation when closed")
+#if DEBUG
+                assertionFailure("Stream must be reset on network activation when closed")
+#endif
+                return
             case .remoteActive, .active, .closing, .closingNeverActivated:
-                preconditionFailure("Cannot become network active twice, in state \(self)")
+                #if DEBUG
+                assertionFailure("Cannot become network active twice, in state \(self)")
+                #endif
+                return
         }
     }
 
@@ -293,9 +301,15 @@ private enum StreamChannelState {
             case .closingNeverActivated, .remoteActive:
                 self = .closingNeverActivated
             case .idle, .localActive:
-                preconditionFailure("Idle streams immediately close")
+#if DEBUG
+                assertionFailure("Idle streams immediately close")
+#endif
+                return
             case .closed:
-                preconditionFailure("Cannot begin closing while closed")
+                #if DEBUG
+                assertionFailure("Cannot begin closing while closed")
+                #endif
+                return
         }
     }
 
@@ -304,7 +318,10 @@ private enum StreamChannelState {
             case .idle, .remoteActive, .closing, .closingNeverActivated, .active, .localActive:
                 self = .closed
             case .closed:
-                preconditionFailure("Complete closing from \(self)")
+#if DEBUG
+                assertionFailure("Complete closing from \(self)")
+#endif
+                return
         }
     }
 }
@@ -376,12 +393,13 @@ private final class QuicStreamChannel: Channel, ChannelCore {
     internal var streamChannelListNode: StreamChannelListNode = StreamChannelListNode()
 
     func localAddress0() throws -> SocketAddress {
-        fatalError()
+        if let addr = self.localAddress { return addr }
+        throw ChannelError.operationUnsupported
     }
 
     func remoteAddress0() throws -> SocketAddress {
-        self.remoteAddress!
-        //fatalError()
+        if let addr = self.remoteAddress { return addr }
+        throw ChannelError.operationUnsupported
     }
 
     internal init(allocator: ByteBufferAllocator,
@@ -409,7 +427,6 @@ private final class QuicStreamChannel: Channel, ChannelCore {
         // go much further.
         //self.autoRead = false
         self._pipeline = ChannelPipeline(channel: self)
-        print("Quic Stream Channel Initialized (bound to remoteAddress: \(self.remoteAddress?.description ?? "NIL"))")
     }
 
     func configure(initializer: ((Channel) -> EventLoopFuture<Void>)?, userPromise promise: EventLoopPromise<Channel>?) {
@@ -484,7 +501,7 @@ private final class QuicStreamChannel: Channel, ChannelCore {
 
         switch option {
             default:
-                fatalError("setting option \(option) on QuicConnectionChannel not supported")
+                throw ChannelError.operationUnsupported
         }
     }
 
@@ -495,20 +512,20 @@ private final class QuicStreamChannel: Channel, ChannelCore {
             case is ChannelOptions.Types.AutoReadOption:
                 return ChannelOptions.Types.AutoReadOption.Value(false) as! Option.Value
             default:
-                fatalError("option \(option) not supported on QuicConnectionChannel")
+                throw ChannelError.operationUnsupported
         }
     }
 
     public func register0(promise: EventLoopPromise<Void>?) {
-        fatalError("not implemented \(#function)")
+        promise?.succeed(())
     }
 
     public func bind0(to: SocketAddress, promise: EventLoopPromise<Void>?) {
-        fatalError("not implemented \(#function)")
+        promise?.fail(ChannelError.operationUnsupported)
     }
 
     public func connect0(to: SocketAddress, promise: EventLoopPromise<Void>?) {
-        fatalError("not implemented \(#function)")
+        promise?.fail(ChannelError.operationUnsupported)
     }
 
     public func write0(_ data: NIOAny, promise: EventLoopPromise<Void>?) {
@@ -902,7 +919,10 @@ private extension StreamChannelList {
         precondition(!element.inList)
 
         guard case .notInList = element.streamChannelListNode.state else {
-            preconditionFailure("Appended an element already in a list")
+#if DEBUG
+            assertionFailure("Appended an element already in a list")
+#endif
+            return
         }
 
         element.streamChannelListNode.state = .inList(next: nil)
@@ -924,7 +944,10 @@ private extension StreamChannelList {
         }
 
         guard case .inList(let next) = head.streamChannelListNode.state else {
-            preconditionFailure("Popped an element not in a list")
+#if DEBUG
+            assertionFailure("Popped an element not in a list")
+#endif
+            return nil
         }
 
         self.head = next

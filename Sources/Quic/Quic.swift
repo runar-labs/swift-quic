@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import NIOCore
+import Logging
 
 let currentVersion: Version = { .version1 }()
 
@@ -24,6 +25,16 @@ let knownVersions: [Version] = {
         .version1,
         .versionDraft29,
     ]
+}()
+
+// Default logging bootstrap if the application did not configure one.
+private let bootstrapLogging: Void = {
+    LoggingSystem.bootstrap { label in
+        var handler = StreamLogHandler.standardOutput(label: label)
+        handler.logLevel = .info
+        return handler
+    }
+    return ()
 }()
 
 func isKnown(version: Version) -> Bool {

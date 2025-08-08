@@ -48,7 +48,7 @@ extension HTTP3 {
                     self = .cancelPush(id: id)
 
                 case SETTINGS_FRAME_TYPE_ID:
-                    print("TODO::H3:Frame -> Decode Settings Frame")
+                    // TODO: Implement Settings frame parsing
                     return nil
 
                 case PUSH_PROMISE_FRAME_TYPE_ID:
@@ -111,7 +111,7 @@ extension HTTP3 {
                     b += varInt
                     return b
                 case .settings(let settings):
-                    print("TODO: Encode Settings H3:Frame Type")
+                    // TODO: Implement Settings frame encoding
                     return []
                 case .pushPromise(let pushID, let headerBlock):
                     let varInt = writeQuicVarInt(pushID)
@@ -147,7 +147,6 @@ extension HTTP3 {
                     b += fieldValue
                     return b
                 case .unknown:
-                    print("Error: Attempting to encode unknown H3:Frame Type")
                     return []
             }
         }

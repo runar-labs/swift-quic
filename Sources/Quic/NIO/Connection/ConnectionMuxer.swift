@@ -15,6 +15,7 @@
 import Atomics
 import NIOCore
 import NIOSSL
+import Logging
 
 //struct ChannelIdentifier:Equatable {
 //    let address:SocketAddress
@@ -46,6 +47,7 @@ final class QuicConnectionMultiplexer: ChannelInboundHandler, ChannelOutboundHan
     private var didReadChannels: ConnectionChannelList = ConnectionChannelList()
     private var flushState: FlushState = .notReading
     private var tlsContext: NIOSSLContext
+    private let logger = Logger(label: "quic.conn.mux")
 
     public init(channel: Channel, tlsContext: NIOSSLContext, inboundConnectionInitializer initializer: ((Channel) -> EventLoopFuture<Void>)?) {
         self.channel = channel
@@ -66,15 +68,14 @@ final class QuicConnectionMultiplexer: ChannelInboundHandler, ChannelOutboundHan
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let envelope = unwrapInboundIn(data)
-        print("Inbound Data From \(envelope.remoteAddress):")
-        print(Array(envelope.data.readableBytesView).hexString)
+        self.logger.trace("inbound datagram", metadata: ["from": .string(envelope.remoteAddress.description), "bytes": .string(Array(envelope.data.readableBytesView).hexString)])
 
         self.flushState.startReading()
 
         // Try and quickly mux on the hashed socket address
         if let channel = connections[envelope.remoteAddress] {
             // Forward the data along
-            print("Forwarding data along to Connection @ \(envelope.remoteAddress)")
+            self.logger.trace("forward to connection", metadata: ["addr": .string(envelope.remoteAddress.description)])
             channel.receiveInboundFrame(envelope.data)
             if !channel.inList {
                 self.didReadChannels.append(channel)
@@ -82,33 +83,38 @@ final class QuicConnectionMultiplexer: ChannelInboundHandler, ChannelOutboundHan
             // Otherwise we need to mux on the DCID of the Traffic packet
         } else if let connection = connections.first(where: { $0.value.hasActiveDCIDFor(envelope.data) }) {
             // Update the socket address in our dictionary
-            print("Active Migration for DCID from \(connection.key) -> \(envelope.remoteAddress). Updating SocketAddress.")
+            self.logger.info("active migration", metadata: ["from": .string(connection.key.description), "to": .string(envelope.remoteAddress.description)])
             self.connections.removeValue(forKey: connection.key)
             self.connections[envelope.remoteAddress] = connection.value
             // Forward the data along
-            print("Forwarding data along to Connection @ \(envelope.remoteAddress)")
+            self.logger.trace("forward to migrated connection", metadata: ["addr": .string(envelope.remoteAddress.description)])
             connection.value.receiveInboundFrame(envelope.data)
             if !connection.value.inList {
                 self.didReadChannels.append(connection.value)
             }
             // If there are no matches for open connections, check to see if it's a valid InitialPacket and proceed to open a new connection
         } else {
-            guard let firstByte = envelope.data.getBytes(at: 0, length: 1)?.first else { print("QuicConnectionMultiplexer::No Bytes Available"); return }
-            guard PacketType(firstByte) == .Initial else { print("QuicConnectionMultiplexer::First Byte doesn't indicate an InitialPacket"); return }
-            guard let version = envelope.data.getVersion(at: 1) else { print("QuicConnectionMultiplexer::Failed to read Version"); return }
-            guard isSupported(version: version) else { print("QuicConnectionMultiplexer::Unsupported Version \(version)"); return }
-            guard let dcid = envelope.data.getConnectionID(at: 5) else { print("QuicConnectionMultiplexer::Failed to read DCID"); return }
+            guard let firstByte = envelope.data.getBytes(at: 0, length: 1)?.first else { self.logger.error("no bytes available"); return }
+            guard PacketType(firstByte) == .Initial else { self.logger.error("first byte not initial"); return }
+            guard let version = envelope.data.getVersion(at: 1) else { self.logger.error("failed to read version"); return }
+            guard isSupported(version: version) else { self.logger.error("unsupported version", metadata: ["version": .stringConvertible(version.rawValue)]) ; return }
+            guard let dcid = envelope.data.getConnectionID(at: 5) else { self.logger.error("failed to read dcid"); return }
             let scid: ConnectionID? = envelope.data.getConnectionID(at: 5 + dcid.lengthPrefixedBytes.count)
 
             // Open a new connection
-            print("Opening new Channel for \(envelope.remoteAddress)")
+            self.logger.info("opening new connection", metadata: ["addr": .string(envelope.remoteAddress.description)])
 
             let channel = QuicConnectionChannel(allocator: self.channel.allocator, parent: self.channel, multiplexer: self, remoteAddress: envelope.remoteAddress)
             self.connections[envelope.remoteAddress] = channel
 
-            try! channel.pipeline.syncOperations.addHandlers([
-                QUICServerHandler(envelope.remoteAddress, version: version, destinationID: dcid, sourceID: scid, tlsContext: self.tlsContext)
-            ])
+            do {
+                try channel.pipeline.syncOperations.addHandlers([
+                    QUICServerHandler(envelope.remoteAddress, version: version, destinationID: dcid, sourceID: scid, tlsContext: self.tlsContext)
+                ])
+            } catch {
+                self.logger.error("failed to add server handler", metadata: ["error": .string(String(describing: error))])
+                return
+            }
             channel.configure(initializer: self.inboundConnectionStateInitializer, userPromise: nil)
             channel.pipeline.fireChannelActive()
             channel.receiveInboundFrame(envelope.data)
@@ -148,8 +154,7 @@ final class QuicConnectionMultiplexer: ChannelInboundHandler, ChannelOutboundHan
     public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         /* for now just forward */
         let envelope = self.unwrapOutboundIn(data)
-        print("Sending \(envelope.remoteAddress):")
-        print(Array(envelope.data.readableBytesView).hexString)
+        self.logger.trace("sending datagram", metadata: ["to": .string(envelope.remoteAddress.description), "bytes": .string(Array(envelope.data.readableBytesView).hexString)])
         context.write(data, promise: promise)
     }
 
@@ -157,7 +162,7 @@ final class QuicConnectionMultiplexer: ChannelInboundHandler, ChannelOutboundHan
         // We just got channelActive. Any previously existing channels may be marked active.
         //self.activateChannels(self.streams.values, context: context)
         //self.activateChannels(self.pendingStreams.values, context: context)
-        print("QUICConnectionMultiplexer::ChannelActive")
+        self.logger.trace("channel active")
         context.fireChannelActive()
     }
 
@@ -206,13 +211,12 @@ extension QuicConnectionMultiplexer {
 
 extension QuicConnectionMultiplexer {
     internal func childChannelClosed(address: SocketAddress) {
-        print("QuicConnectionMultiplexer: Closing Child Channel bound to \(address)")
+        self.logger.debug("closing child connection", metadata: ["addr": .string(address.description)])
         self.connections.removeValue(forKey: address)
     }
 
     internal func childChannelWrite(_ envelope: AddressedEnvelope<ByteBuffer>, promise: EventLoopPromise<Void>?) {
-        print("Sending \(envelope.remoteAddress):")
-        print(Array(envelope.data.readableBytesView).hexString)
+        self.logger.trace("child write", metadata: ["to": .string(envelope.remoteAddress.description), "bytes": .string(Array(envelope.data.readableBytesView).hexString)])
         self.context.write(self.wrapOutboundOut(envelope), promise: promise)
     }
 
@@ -254,7 +258,10 @@ private enum ConnectionChannelState {
             case .remoteActive:
                 self = .active
             case .localActive, .active, .closing, .closingNeverActivated, .closed:
-                preconditionFailure("Became active from state \(self)")
+#if DEBUG
+                assertionFailure("Became active from state \(self)")
+#endif
+                return
         }
     }
 
@@ -265,9 +272,15 @@ private enum ConnectionChannelState {
             case .localActive:
                 self = .active
             case .closed:
-                preconditionFailure("Stream must be reset on network activation when closed")
+#if DEBUG
+                assertionFailure("Stream must be reset on network activation when closed")
+#endif
+                return
             case .remoteActive, .active, .closing, .closingNeverActivated:
-                preconditionFailure("Cannot become network active twice, in state \(self)")
+                #if DEBUG
+                assertionFailure("Cannot become network active twice, in state \(self)")
+                #endif
+                return
         }
     }
 
@@ -278,9 +291,15 @@ private enum ConnectionChannelState {
             case .closingNeverActivated, .remoteActive:
                 self = .closingNeverActivated
             case .idle, .localActive:
-                preconditionFailure("Idle streams immediately close")
+#if DEBUG
+                assertionFailure("Idle streams immediately close")
+#endif
+                return
             case .closed:
-                preconditionFailure("Cannot begin closing while closed")
+                #if DEBUG
+                assertionFailure("Cannot begin closing while closed")
+                #endif
+                return
         }
     }
 
@@ -289,7 +308,10 @@ private enum ConnectionChannelState {
             case .idle, .remoteActive, .closing, .closingNeverActivated, .active, .localActive:
                 self = .closed
             case .closed:
-                preconditionFailure("Complete closing from \(self)")
+#if DEBUG
+                assertionFailure("Complete closing from \(self)")
+#endif
+                return
         }
     }
 }
@@ -298,9 +320,9 @@ private enum ConnectionChannelState {
 /// - Note: This is esentially copy-pasted from NIO's HTTP2 Channel
 internal final class QuicConnectionChannel: Channel, ChannelCore {
 
-    internal var activeDCIDs: [ConnectionID] = [] {
-        didSet { print("QuicConnectionChannel::Updating Active DCIDs: \(self.activeDCIDs)") }
-    }
+    private let logger = Logger(label: "quic.connectionchannel")
+
+    internal var activeDCIDs: [ConnectionID] = []
 
     internal func hasActiveDCIDFor(_ buffer: ByteBuffer) -> Bool {
         return self.activeDCIDs.contains { buffer.getBytes(at: 1, length: $0.length) == $0.rawValue }
@@ -367,12 +389,13 @@ internal final class QuicConnectionChannel: Channel, ChannelCore {
     internal var streamChannelListNode: ConnectionChannelListNode = ConnectionChannelListNode()
 
     func localAddress0() throws -> SocketAddress {
-        fatalError()
+        if let addr = self.localAddress { return addr }
+        throw ChannelError.operationUnsupported
     }
 
     func remoteAddress0() throws -> SocketAddress {
-        self.remoteAddress!
-        //fatalError()
+        if let addr = self.remoteAddress { return addr }
+        throw ChannelError.operationUnsupported
     }
 
     internal init(allocator: ByteBufferAllocator,
@@ -399,7 +422,6 @@ internal final class QuicConnectionChannel: Channel, ChannelCore {
         // go much further.
         //self.autoRead = false
         self._pipeline = ChannelPipeline(channel: self)
-        print("UDP Stream Channel Initialized (bound to remoteAddress: \(remoteAddress.description))")
     }
 
     func configure(initializer: ((Channel) -> EventLoopFuture<Void>)?, userPromise promise: EventLoopPromise<Channel>?) {
@@ -421,7 +443,7 @@ internal final class QuicConnectionChannel: Channel, ChannelCore {
     private func postInitializerActivate(promise: EventLoopPromise<Channel>?) {
         // This force unwrap is safe as parent is assigned in the initializer, and never unassigned.
         // If parent is not active, we expect to receive a channelActive later.
-        print("PostInitializerActivate::ParentActive == \(self.parent?.isActive)")
+        self.logger.trace("post initializer activate", metadata: ["parentActive": .stringConvertible(self.parent?.isActive ?? false)])
         if self.parent!.isActive {
             self.modifyingState { $0.activate() }
             self.pipeline.fireChannelActive()
@@ -475,7 +497,7 @@ internal final class QuicConnectionChannel: Channel, ChannelCore {
 
         switch option {
             default:
-                fatalError("setting option \(option) on QuicConnectionChannel not supported")
+                throw ChannelError.operationUnsupported
         }
     }
 
@@ -486,20 +508,20 @@ internal final class QuicConnectionChannel: Channel, ChannelCore {
             case is ChannelOptions.Types.AutoReadOption:
                 return ChannelOptions.Types.AutoReadOption.Value(false) as! Option.Value
             default:
-                fatalError("option \(option) not supported on QuicConnectionChannel")
+                throw ChannelError.operationUnsupported
         }
     }
 
     public func register0(promise: EventLoopPromise<Void>?) {
-        fatalError("not implemented \(#function)")
+        promise?.succeed(())
     }
 
     public func bind0(to: SocketAddress, promise: EventLoopPromise<Void>?) {
-        fatalError("not implemented \(#function)")
+        promise?.fail(ChannelError.operationUnsupported)
     }
 
     public func connect0(to: SocketAddress, promise: EventLoopPromise<Void>?) {
-        fatalError("not implemented \(#function)")
+        promise?.fail(ChannelError.operationUnsupported)
     }
 
     public func write0(_ data: NIOAny, promise: EventLoopPromise<Void>?) {
@@ -808,7 +830,7 @@ private extension QuicConnectionChannel {
     /// - parameters:
     ///     - frame: The `QUICFrame` received from the network.
     func receiveInboundFrame(_ frame: ByteBuffer) {
-        print("UDPStreamChannel::ReceiveInboundFrame::State == \(self.state)")
+        self.logger.trace("receive inbound frame", metadata: ["state": .string(String(describing: self.state))])
         guard self.state != .closed else {
             // Do nothing
             return
@@ -909,7 +931,10 @@ private extension ConnectionChannelList {
         precondition(!element.inList)
 
         guard case .notInList = element.streamChannelListNode.state else {
-            preconditionFailure("Appended an element already in a list")
+#if DEBUG
+            assertionFailure("Appended an element already in a list")
+#endif
+            return
         }
 
         element.streamChannelListNode.state = .inList(next: nil)
@@ -931,7 +956,10 @@ private extension ConnectionChannelList {
         }
 
         guard case .inList(let next) = head.streamChannelListNode.state else {
-            preconditionFailure("Popped an element not in a list")
+#if DEBUG
+            assertionFailure("Popped an element not in a list")
+#endif
+            return nil
         }
 
         self.head = next

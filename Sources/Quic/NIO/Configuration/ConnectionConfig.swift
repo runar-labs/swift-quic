@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import NIOCore
+import NIO
 import NIOSSL
 
 /// - Note: Borrowed from Quiche!!
@@ -87,8 +88,10 @@ extension Config {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     public mutating func loadCertChainFromPEMFile(file: String) -> EventLoopPromise<Bool> {
-        //NIOSSLContext.useCertificateChainFile(file, context: &self.tlsContex)
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Configures the given private key.
@@ -103,8 +106,10 @@ extension Config {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     public mutating func loadPrivateKeyFromPEMFile(file: String) -> EventLoopPromise<Bool> {
-        //self.tls_ctx.use_privkey_file(file)
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Specifies a file where trusted CA certificates are stored for the
@@ -120,8 +125,10 @@ extension Config {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     public mutating func loadVerifyLocationsFromFile(file: String) -> EventLoopPromise<Bool> {
-        //self.tls_ctx.load_verify_locations_from_file(file)
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Specifies a directory where trusted CA certificates are stored for the
@@ -137,8 +144,10 @@ extension Config {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     public mutating func loadVerifyLocationsFromDirectory(dir: String) -> EventLoopPromise<Bool> {
-        //self.tls_ctx.load_verify_locations_from_directory(dir)
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Configures whether to verify the peer's certificate.
@@ -146,8 +155,7 @@ extension Config {
     /// The default value is `true` for client connections, and `false` for
     /// server ones.
     public mutating func verifyPeer(verify: Bool) {
-        //self.tls_ctx.set_verify(verify);
-        preconditionFailure("Not Yet Implemented")
+        // TODO: configure verification on NIOSSLContext when available
     }
 
     /// Configures whether to send GREASE values.
@@ -166,9 +174,7 @@ extension Config {
     /// [`set_keylog()`]: struct.Connection.html#method.set_keylog
     /// [keylog]: https://developer.mozilla.org/en-US/docs/Mozilla/Projects/NSS/Key_Log_Format
     public mutating func log_keys() {
-        //self.tls_ctx.enable_keylog();
-        //NIOSSLContext.keyLogCallback = ...
-        preconditionFailure("Not Yet Implemented")
+        // TODO: expose keylog callback hook via NIOSSL quic branch
     }
 
     /// Configures the session ticket key material.
@@ -182,16 +188,15 @@ extension Config {
     /// servers), in which case the application is also responsible for
     /// rotating the key to provide forward secrecy.
     public mutating func set_ticket_key(key: [UInt8]) -> EventLoopPromise<Bool> {
-        //self.tls_ctx.set_ticket_key(key)
-        //NIOSSLContext.set_ticket_key(key: key)
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Enables sending or receiving early data.
     public mutating func enableEarlyData() {
-        //self.tls_ctx.set_early_data_enabled(true);
-        //NIOSSLContext.set_enable_early_data(true)
-        preconditionFailure("Not Yet Implemented")
+        // TODO: configure early data on NIOSSL if/when supported
     }
 
     /// Configures the list of supported application protocols.
@@ -213,8 +218,10 @@ extension Config {
     /// ```
     public mutating func setApplicationProtos(list: [[UInt8]]) -> EventLoopPromise<Bool> {
         self.applicationProtos = list
-        //NIOSSLContext.setAlpnProtocols(list, context: self.tlsContex)
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Configures the list of supported application protocols using wire
@@ -391,11 +398,10 @@ extension Config {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     public mutating func setCongestionControlAlgorithmName(name: String) -> EventLoopPromise<Bool> {
-        //self.cc_algorithm = CongestionControlAlgorithm::from_str(name)?;
-
-        //Ok(())
-        //return
-        preconditionFailure("Not Yet Implemented")
+        let loop = MultiThreadedEventLoopGroup(numberOfThreads: 1).next()
+        let promise = loop.makePromise(of: Bool.self)
+        promise.fail(ChannelError.operationUnsupported)
+        return promise
     }
 
     /// Sets the congestion control algorithm used.

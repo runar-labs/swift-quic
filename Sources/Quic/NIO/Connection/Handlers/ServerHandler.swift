@@ -15,6 +15,7 @@
 import Foundation
 import NIOCore
 import NIOSSL
+import Logging
 
 final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     public typealias InboundIn = Packet
@@ -28,7 +29,7 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     private let tlsHandler: NIOSSLServerHandler
 
     private(set) var state: QuicStateMachine.State {
-        didSet { print("QUICServerHandler::State::Transitioned from \(oldValue) to \(self.state)") }
+        didSet { logger.debug("state transition", metadata: ["from": .string(String(describing: oldValue)), "to": .string(String(describing: self.state))]) }
     }
 
     let mode: EndpointRole = .server
@@ -37,7 +38,7 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     var retiredDCIDs: [ConnectionID] = []
     var dcid: Quic.ConnectionID {
         didSet {
-            print("QUICServerHandler::Quic State Updated::DCID \(oldValue.rawValue.hexString) -> \(self.dcid.rawValue.hexString)")
+            logger.debug("dcid updated", metadata: ["old": .string(oldValue.rawValue.hexString), "new": .string(self.dcid.rawValue.hexString)])
             self.retiredDCIDs.append(oldValue)
         }
     }
@@ -45,7 +46,7 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     var retiredSCIDs: [ConnectionID] = []
     var scid: Quic.ConnectionID {
         didSet {
-            print("QUICServerHandler::Quic State Updated::SCID \(oldValue.rawValue.hexString) -> \(self.scid.rawValue.hexString)")
+            logger.debug("scid updated", metadata: ["old": .string(oldValue.rawValue.hexString), "new": .string(self.scid.rawValue.hexString)])
             self.retiredSCIDs.append(oldValue)
         }
     }
@@ -59,40 +60,42 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     private var peerTransportParams: TransportParams?
 
     var ourParams: [UInt8] {
-        print("Our Quic TransportParams were accessed...")
-        return try! Array(self.ourTransportParams.encode(perspective: .server).readableBytesView)
+        logger.trace("accessing server transport params")
+        return (try? Array(self.ourTransportParams.encode(perspective: .server).readableBytesView)) ?? []
     }
 
     var useLegacyQuicParams: Bool {
         self.version == .versionDraft29 ? true : false
     }
 
+    private let logger = Logger(label: "quic.server")
+
     func onReadSecret(epoch: UInt32, cipherSuite: UInt16, secret: [UInt8]) {
-        guard let suite = try? CipherSuite(cipherSuite) else { fatalError("OnReadSecret Called for unsupported CipherSuite: \(cipherSuite)") }
+        guard let suite = try? CipherSuite(cipherSuite) else { logger.error("unsupported cipher suite", metadata: ["suite": .stringConvertible(cipherSuite)]); return }
         switch epoch {
             case 2:
                 self.packetProtectorHandler.installHandshakeKeys(secret: secret, for: .client, cipherSuite: suite)
             case 3:
                 self.packetProtectorHandler.installTrafficKeys(secret: secret, for: .client, cipherSuite: suite)
             default:
-                fatalError("OnReadSecret Called for unsupported Epoch: \(epoch) Secret: \(secret.hexString)")
+                logger.error("unsupported epoch in onReadSecret", metadata: ["epoch": .stringConvertible(epoch)])
         }
     }
 
     func onWriteSecret(epoch: UInt32, cipherSuite: UInt16, secret: [UInt8]) {
-        guard let suite = try? CipherSuite(cipherSuite) else { fatalError("OnWriteSecret Called for unsupported CipherSuite: \(cipherSuite)") }
+        guard let suite = try? CipherSuite(cipherSuite) else { logger.error("unsupported cipher suite", metadata: ["suite": .stringConvertible(cipherSuite)]); return }
         switch epoch {
             case 2:
                 self.packetProtectorHandler.installHandshakeKeys(secret: secret, for: .server, cipherSuite: suite)
             case 3:
                 self.packetProtectorHandler.installTrafficKeys(secret: secret, for: .server, cipherSuite: suite)
             default:
-                fatalError("OnWriteSecret Called for unsupported Epoch: \(epoch) Secret: \(secret.hexString)")
+                logger.error("unsupported epoch in onWriteSecret", metadata: ["epoch": .stringConvertible(epoch)])
         }
     }
 
     func onPeerParams(params: [UInt8]) {
-        print("We got our Peers Transport Params: \(params.hexString)")
+        logger.trace("peer transport params", metadata: ["params": .string(params.hexString)])
         var buf = ByteBuffer(bytes: params)
         self.peerTransportParams = try? TransportParams.decode(&buf, perspective: .client)
     }
@@ -138,12 +141,17 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     }
 
     public func handlerAdded(context: ChannelHandlerContext) {
-        print("QUICServerHandler::Added")
+        logger.trace("handler added")
         self.storedContext = context
         // Install the PacketProtectorHandler in front of us
-        try! context.pipeline.syncOperations.addHandler(self.packetProtectorHandler, position: .before(self))
-        try! context.pipeline.syncOperations.addHandler(self.ackHandler, position: .before(self))
-        try! context.pipeline.syncOperations.addHandler(self.tlsHandler, position: .after(self))
+        do {
+            try context.pipeline.syncOperations.addHandler(self.packetProtectorHandler, position: .before(self))
+            try context.pipeline.syncOperations.addHandler(self.ackHandler, position: .before(self))
+            try context.pipeline.syncOperations.addHandler(self.tlsHandler, position: .after(self))
+        } catch {
+            logger.error("failed to add handlers", metadata: ["error": .string(String(describing: error))])
+            context.fireErrorCaught(error)
+        }
 
         if let chan = context.channel as? QuicConnectionChannel {
             chan.activeDCIDs = [self.scid]
@@ -156,7 +164,7 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     }
 
     public func channelActive(context: ChannelHandlerContext) {
-        print("QUICServerHandler::ChannelActive")
+        logger.trace("channel active")
         // Store our context
         self.storedContext = context
         // Update our state machine
@@ -169,11 +177,11 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     }
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        print("QUICServerHandler::ChannelRead")
+        logger.trace("channel read")
 
         let packet = unwrapInboundIn(data)
 
-        print("QUICServerHandler::Server Received Packet \(packet)")
+        logger.trace("inbound packet", metadata: ["type": .string(String(describing: PacketType(packet.header.firstByte)))])
 
         // If we're idle and we just received our first message, bump the state and fire a channelActive event...
         if self.state == .idle {
@@ -183,7 +191,7 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
 
         switch self.state {
             case .idle:
-                print("QUICServerHandler::ChannelRead::Invalid State = `Idle` reading anyways")
+                logger.warning("read in idle state")
             case .handshaking(let handshakeState):
                 switch handshakeState {
                     case .initial:
@@ -191,17 +199,18 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                         // Open the InitialPacket
                         // TODO: Operate on the bytebuffer directly
                         guard let cryptoFrame = initialPacket.payload.first as? Frames.Crypto else { context.fireErrorCaught(Errors.InvalidPacket); return }
-                        print("CryptoFrame: \(cryptoFrame.data.hexString)")
+                        logger.trace("crypto frame", metadata: ["buf": .string(cryptoFrame.data.hexString)])
 
                         //For the time being, lets strip out the ClientHello crypto frame and only send that down the pipeline...
                         // TODO: Ensure the CryptoFrame contains a ClientHello
                         guard var clientHelloBytes = ByteBuffer(bytes: cryptoFrame.data).getTLSClientHello() else { context.fireErrorCaught(Errors.InvalidPacket); return }
                         guard let clientHello = try? ClientHello(header: [], payload: &clientHelloBytes) else { context.fireErrorCaught(Errors.InvalidPacket); return }
-                        print(clientHello)
-                        print("Quic Params")
-                        var extBuf = ByteBuffer(bytes: clientHello.extensions.first(where: { $0.type == [0x00, 0x39] })!.value)
-                        let quicParams = try! TransportParams.decode(&extBuf, perspective: .server)
-                        print(quicParams)
+                        logger.trace("clienthello", metadata: ["val": .string(String(describing: clientHello))])
+                        logger.trace("quic params from clienthello")
+                        guard let extVal = clientHello.extensions.first(where: { $0.type == [0x00, 0x39] })?.value else { context.fireErrorCaught(Errors.InvalidTransportParam); return }
+                        var extBuf = ByteBuffer(bytes: extVal)
+                        guard let quicParams = try? TransportParams.decode(&extBuf, perspective: .server) else { context.fireErrorCaught(Errors.InvalidTransportParam); return }
+                        logger.debug("client transport params", metadata: ["params": .string(String(describing: quicParams))])
 
                         var cryptoBuffer = ByteBuffer()
                         cryptoFrame.encode(into: &cryptoBuffer)
@@ -209,20 +218,20 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                         return
 
                     case .firstHandshake, .secondHandshake:
-                        print("QUICServerHandler::ChannelRead::TODO - Handle Handshake")
+                        logger.debug("TODO: handle handshake")
                         // At this point we're expecting a couple ACKs from the client (an Initial ACK and a Handshake ACK)
                         if let initialPacket = packet as? InitialPacket {
-                            print("QUICServerHandler::ChannelRead::Processing Initial Packet")
+                            logger.debug("processing initial packet")
                             // This packet should only contain an ACK...
-                            guard let ack = initialPacket.payload.first as? Frames.ACK else { print("Expected an ACK, didn't get it"); return }
+                            guard let ack = initialPacket.payload.first as? Frames.ACK else { logger.error("expected ack in server initial"); return }
                             self.packetProtectorHandler.dropInitialKeys()
                         }
 
                         if let handshakePacket = packet as? HandshakePacket {
-                            print("QUICServerHandler::ChannelRead::Processing Handshake Packet")
+                            logger.debug("processing handshake packet")
                             // This packet should contain at least an ACK, but also might contain the clients Handshake Finished crypto frame
                             if let cryptoFrame = handshakePacket.payload.first(where: { $0 as? Frames.Crypto != nil }) as? Frames.Crypto {
-                                print("Found a Crypto Frame in our second handshake packet")
+                                logger.trace("found crypto frame in second handshake")
                                 var cryptoBuffer = ByteBuffer()
                                 cryptoFrame.encode(into: &cryptoBuffer)
                                 context.fireChannelRead(wrapInboundOut(cryptoBuffer))
@@ -252,14 +261,14 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                         return
 
                     case .done:
-                        print("QUICServerHandler::ChannelRead::TODO - Handle Traffic")
+                        logger.debug("TODO: handle traffic")
                 }
             case .active:
-                print("QUICServerHandler::ChannelRead::TODO - Handle Short / Traffic Packets")
+                logger.debug("TODO: handle short/traffic")
                 // This should be a stream frame
-                guard let traffic = packet as? ShortPacket else { print("Expected Traffic Packet, didn't get it"); return }
+                guard let traffic = packet as? ShortPacket else { logger.error("expected traffic packet"); return }
                 if let streamFrame = traffic.payload.first(where: { ($0 as? Frames.Stream) != nil }) as? Frames.Stream {
-                    print("Got a Stream Frame")
+                    logger.debug("got stream frame")
                     let echoPacket = ShortPacket(
                         header: GenericShortHeader(firstByte: 0b01000001, id: self.dcid, packetNumber: []),
                         payload: [Frames.HandshakeDone(), streamFrame]
@@ -269,34 +278,33 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                 }
 
             case .receivedDisconnect:
-                print("QUICServerHandler::ChannelRead::TODO - Handle Received Disconnect")
+                logger.info("TODO: handle received disconnect")
             case .sentDisconnect:
-                print("QUICServerHandler::ChannelRead::TODO - Handle Sent Disconnect")
+                logger.info("TODO: handle sent disconnect")
         }
     }
 
     public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         var buffer = unwrapOutboundIn(data)
-        print("QUICServerHandler::Write")
-        print(buffer.readableBytesView.hexString)
+        logger.trace("server write", metadata: ["buf": .string(buffer.readableBytesView.hexString)])
 
         switch self.state {
             case .idle:
-                print("QUICServerHandler::Write::Invalid State = `Idle` writing anyways")
+                logger.warning("write in idle state")
             case .handshaking(let handshakeState):
                 switch handshakeState {
                     case .initial:
-                        print("QUICServerHandler::Handling Initial")
+                        logger.debug("handling initial write")
                         // We should have 2 Crypto Frames in our buffer (the ServerHello and the first portion of our ServerHandshake (which includes the Cert and Extensions))
                         // Create the Server Initial Packet
-                        guard let cryptoFrame = buffer.readCryptoFrame() else { print("Failed to read ServerHello"); return }
+                        guard let cryptoFrame = buffer.readCryptoFrame() else { logger.error("failed to read serverhello"); return }
 
-                        guard var serverHello = ByteBuffer(bytes: cryptoFrame.data).getTLSServerHello() else { print("QUICServerHandler::ChannelRead::Expected TLS ServerHello, didn't get it"); return }
+                        guard var serverHello = ByteBuffer(bytes: cryptoFrame.data).getTLSServerHello() else { logger.error("expected tls serverhello"); return }
 
                         // Get our chosen cipher suite
-                        guard let sh = try? ServerHello(header: [], payload: &serverHello) else { print("QUICServerHandler::Failed to parse ServerHello"); return }
-                        guard let cs = try? CipherSuite( sh.cipherSuite ) else { print("QUICServerHandler::Unsupported Cipher Suite `\(sh.cipherSuite)`. Abort Handshake"); return }
-                        print("QUICServerHandler::ChannelRead::Updated CipherSuite \(cs)")
+                        guard let sh = try? ServerHello(header: [], payload: &serverHello) else { logger.error("failed to parse serverhello"); return }
+                        guard let cs = try? CipherSuite( sh.cipherSuite ) else { logger.error("unsupported cipher suite", metadata: ["suite": .stringConvertible(sh.cipherSuite)]); return }
+                        logger.debug("cipher suite", metadata: ["suite": .string(String(describing: cs))])
 
                         // TODO: Update our DCID and SCID
                         //self.dcid = ConnectionID(randomOfLength: 4)
@@ -312,16 +320,16 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                         //print(buffer.readableBytesView.hexString)
 
                         // Create the first Server Handshake Packet (consists of the TLS Encrypted Extensions, and Certifcate)
-                        guard let completeServerHandshake = buffer.readCryptoFrame() else { print("Failed to read ServerHandshake"); return }
+                        guard let completeServerHandshake = buffer.readCryptoFrame() else { logger.error("failed to read serverhandshake"); return }
                         // Splice the completeServerHanshake into parts
                         var serverHandshakeBuffer = ByteBuffer(bytes: completeServerHandshake.data)
-                        print("Total Readable Bytes for ServerHandshake: \(serverHandshakeBuffer.readableBytes)")
-                        guard let encryptedExtensions = serverHandshakeBuffer.readTLSEncryptedExtensions() else { print("Failed to read encrypted extensions"); return }
-                        guard let certificate = serverHandshakeBuffer.readTLSCertificate() else { print("Failed to read certificate"); return }
-                        guard let certVerify = serverHandshakeBuffer.readTLSCertificateVerify() else { print("Failed to read certificate verify"); return }
-                        guard let handshakeFinished = serverHandshakeBuffer.readTLSHandshakeFinished() else { print("Failed to read handshake finished"); return }
-                        print("Readable Bytes After Parsing: \(buffer.readableBytes)")
-                        print("Cumulative parts: \(encryptedExtensions.count + certificate.count + certVerify.count + handshakeFinished.count)")
+                        logger.trace("serverhandshake readable bytes", metadata: ["bytes": .stringConvertible(serverHandshakeBuffer.readableBytes)])
+                        guard let encryptedExtensions = serverHandshakeBuffer.readTLSEncryptedExtensions() else { logger.error("failed to read encrypted extensions"); return }
+                        guard let certificate = serverHandshakeBuffer.readTLSCertificate() else { logger.error("failed to read certificate"); return }
+                        guard let certVerify = serverHandshakeBuffer.readTLSCertificateVerify() else { logger.error("failed to read certificate verify"); return }
+                        guard let handshakeFinished = serverHandshakeBuffer.readTLSHandshakeFinished() else { logger.error("failed to read handshake finished"); return }
+                        logger.trace("readable bytes after parsing", metadata: ["bytes": .stringConvertible(buffer.readableBytes)])
+                        logger.trace("cumulative tls parts", metadata: ["bytes": .stringConvertible(encryptedExtensions.count + certificate.count + certVerify.count + handshakeFinished.count)])
                         // TODO: Update our DCID and SCID
                         let serverHandshakeHeader = HandshakeHeader(version: version, destinationID: dcid, sourceID: scid)
                         let serverHandshakePacket = HandshakePacket(
@@ -335,7 +343,7 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                         )
 
                         // Coalesce these two packets into our first datagram and write it out!
-                        print("Writing Coalesced Datagram")
+                        logger.trace("writing coalesced datagram")
                         context.write( wrapOutboundOut([serverInitialPacket, serverHandshakePacket]), promise: nil)
 
                         let serverHandshakeHeader2 = HandshakeHeader(version: version, destinationID: dcid, sourceID: scid)
@@ -360,33 +368,33 @@ final class QUICServerHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
                         return
 
                     case .firstHandshake, .secondHandshake:
-                        print("QUICServerHandler::Write::TODO:Handle Handshake")
+                        logger.debug("TODO: handle handshake write")
 
                     case .done:
-                        print("QUICServerHandler::Write::TODO:Handle Traffic")
+                        logger.debug("TODO: handle traffic write")
                 }
             case .active:
-                print("QUICServerHandler::Write::TODO:Handle Short / Traffic Packets")
+                logger.debug("TODO: handle short/traffic write")
             case .receivedDisconnect:
-                print("QUICServerHandler::Write::TODO:Handle Received Disconnect")
+                logger.info("TODO: handle received disconnect")
             case .sentDisconnect:
-                print("QUICServerHandler::Write::TODO:Handle Sent Disconnect")
+                logger.info("TODO: handle sent disconnect")
         }
     }
 
     public func flush(context: ChannelHandlerContext) {
-        print("QUICServerHandler::Flush::Called - Flushing")
+        logger.trace("flush")
         context.flush()
     }
 
     // Flush it out. This can make use of gathering writes if multiple buffers are pending
     public func channelWriteComplete(context: ChannelHandlerContext) {
-        print("QUICServerHandler::ChannelWriteComplete::Called - Flushing")
+        logger.trace("channel write complete")
         context.flush()
     }
 
     public func errorCaught(ctx: ChannelHandlerContext, error: Error) {
-        print("QUICServerHandler::ErrorCaught: \(error)")
+        logger.error("error caught", metadata: ["error": .string(String(describing: error))])
         ctx.close(promise: nil)
     }
 }

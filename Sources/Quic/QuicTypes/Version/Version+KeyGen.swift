@@ -36,7 +36,8 @@ extension Version {
             case .versionDraft29:
                 return Version.QUIC_SALT_DRAFT_29
             default:
-                preconditionFailure("Unsupported Quic Version \(self)")
+                // Fallback to v1 salt for unknown versions to avoid crashing; upper layers should validate supported versions
+                return Version.QUIC_SALT_V1
         }
     }
 

@@ -29,7 +29,7 @@ extension HeaderProtector {
     /// - Note: This operation is bi-directional, if the header is currently protected, invoking this function will result in an unprotected header. If the header is currently unprotected, invoking this function will result in a protected header.
     func applyMask<SAMPLE, BYTES>(sample: SAMPLE, headerBytes: inout BYTES, packetNumberOffset: Int) throws where SAMPLE: ContiguousBytes, BYTES: ContiguousBytes {
         let sample = sample.withUnsafeBytes { Array($0) }
-        guard sample.count == self.sampleLength else { preconditionFailure("Invalid Sample Size \(sample.count) != \(sampleLength)") }
+        guard sample.count == self.sampleLength else { throw Errors.InvalidPacket }
 
         // Generate the Mask and
         let mask = try self.cipher.generateMask(sample: sample)
@@ -46,7 +46,11 @@ extension HeaderProtector {
         header.xorSubrange(from: packetNumberOffset, to: header.count, with: Array(mask[1...]))
 
         //Cast header back to BYTES
-        headerBytes = header as! BYTES
+        if let casted = header as? BYTES {
+            headerBytes = casted
+        } else {
+            throw Errors.InvalidPacket
+        }
     }
 
     func removeMask<SAMPLE, BYTES>(sample: SAMPLE, headerBytes: inout BYTES, packetNumberOffset: Int) throws where SAMPLE: ContiguousBytes, BYTES: ContiguousBytes {
@@ -55,7 +59,10 @@ extension HeaderProtector {
         // Drop unused packet number bytes if necessary
         headerBytes.withUnsafeBytes({ ptr in
             if let firstByte = ptr.first, let pnl = PacketNumberLength(rawValue: firstByte & PacketNumberLength.mask) {
-                headerBytes = Array(ptr.dropLast(4 - pnl.bytesToRead)) as! BYTES
+                let truncated = Array(ptr.dropLast(4 - pnl.bytesToRead))
+                if let casted = truncated as? BYTES {
+                    headerBytes = casted
+                }
             }
         })
     }
