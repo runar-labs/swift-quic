@@ -38,7 +38,8 @@ let package = Package(
       name: "QuicTests",
       dependencies: [
         "Quic",
-        .product(name: "NIOEmbedded", package: "swift-nio")
+        .product(name: "NIOEmbedded", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio")
       ]
     ),
   ]

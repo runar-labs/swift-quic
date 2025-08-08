@@ -1,5 +1,9 @@
 import XCTest
 import Foundation
+import NIOCore
+import NIOPosix
+import NIOSSL
+@testable import Quic
 
 final class QuinnInteropTests: XCTestCase {
     private func requireEnvEnabled() throws {
@@ -50,9 +54,43 @@ final class QuinnInteropTests: XCTestCase {
 
     func testQuinnEchoInteropSkeleton() throws {
         try requireEnvEnabled()
-        _ = try lookupEnv("QUINN_SERVER_BIN")
-        _ = try lookupEnv("QUINN_CLIENT_BIN")
-        throw XCTSkip("Interop handshake+echo wiring TBD: will spin Quinn server and connect via SwiftNIO datagram + QUIC handlers.")
+        let serverAddr = ProcessInfo.processInfo.environment["QUINN_SERVER_ADDR"] ?? "127.0.0.1:4433"
+
+        // Set up a UDP channel with our QUIC client pipeline, attempt to connect to Quinn server.
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+
+        let parts = serverAddr.split(separator: ":")
+        XCTAssertEqual(parts.count, 2, "QUINN_SERVER_ADDR must be host:port")
+        let host = String(parts[0])
+        let port = Int(parts[1]) ?? 4433
+
+        var clientTLS = TLSConfiguration.makeClientConfiguration()
+        clientTLS.minimumTLSVersion = .tlsv13
+        clientTLS.maximumTLSVersion = .tlsv13
+        clientTLS.applicationProtocols = ["echo"]
+        clientTLS.certificateVerification = .none
+        let clientContext = try NIOSSLContext(configuration: clientTLS)
+
+        let bootstrap = DatagramBootstrap(group: group)
+            .channelInitializer { channel in
+                let remote = try! SocketAddress.makeAddressResolvingHost(host, port: port)
+                let handler = try! QUICClientHandler(remote, version: .version1, tlsContext: clientContext)
+                return channel.pipeline.addHandlers([
+                    QuicConnectionMultiplexer(channel: channel, tlsContext: clientContext, inboundConnectionInitializer: nil),
+                    handler
+                ])
+            }
+
+        let channel = try bootstrap.bind(host: "0.0.0.0", port: 0).wait()
+        defer { try? channel.close().wait() }
+
+        // Trigger connect to remote by sending an initial write (client handler does on active)
+        // Drive event loop for a short time and assert no crash; full echo left for future when server is pinned.
+        let deadline = NIODeadline.now() + .seconds(2)
+        while group.next().inEventLoop == false && NIODeadline.now() < deadline { }
+
+        throw XCTSkip("End-to-end echo assertion pending Quinn server fixture; smoke bind/init ok.")
     }
 }
 
