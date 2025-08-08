@@ -36,7 +36,10 @@ let package = Package(
     ),
     .testTarget(
       name: "QuicTests",
-      dependencies: ["Quic"]
+      dependencies: [
+        "Quic",
+        .product(name: "NIOEmbedded", package: "swift-nio")
+      ]
     ),
   ]
 )

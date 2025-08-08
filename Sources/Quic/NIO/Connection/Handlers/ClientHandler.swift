@@ -74,6 +74,7 @@ final class QUICClientHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
     }
 
     private var storedContext: ChannelHandlerContext!
+    private var ackTimer: RepeatedTask?
 
     // Quic Delegate Protocol Conformance
     private var transportParams: TransportParams
@@ -169,12 +170,33 @@ final class QUICClientHandler: ChannelDuplexHandler, NIOSSLQuicDelegate {
             logger.error("failed to add handlers", metadata: ["error": .string(String(describing: error))])
             context.fireErrorCaught(error)
         }
+
+        // Start a minimal delayed-ACK timer to emit ACKs when idle
+        self.ackTimer = context.eventLoop.scheduleRepeatedTask(initialDelay: .milliseconds(25), delay: .milliseconds(25)) { [weak self] _ in
+            guard let self = self, let ctx = self.storedContext else { return }
+            var packets: [any Packet] = []
+            if self.ackHandler.manager.initial.needsToSendACK {
+                packets.append(InitialPacket(header: InitialHeader(version: self.version, destinationID: self.dcid, sourceID: self.scid), payload: []))
+            }
+            if self.ackHandler.manager.handshake.needsToSendACK {
+                packets.append(HandshakePacket(header: HandshakeHeader(version: self.version, destinationID: self.dcid, sourceID: self.scid), payload: []))
+            }
+            if self.ackHandler.manager.traffic.needsToSendACK {
+                packets.append(ShortPacket(header: GenericShortHeader(firstByte: 0b01000001, id: self.dcid, packetNumber: [0x00]), payload: []))
+            }
+            if packets.isEmpty == false {
+                ctx.write(self.wrapOutboundOut(packets), promise: nil)
+                ctx.flush()
+            }
+        }
     }
 
     public func handlerRemoved(context: ChannelHandlerContext) {
         // We now want to drop the stored context.
         logger.trace("handler removed")
         self.storedContext = nil
+        self.ackTimer?.cancel()
+        self.ackTimer = nil
     }
 
     public func channelActive(context: ChannelHandlerContext) {

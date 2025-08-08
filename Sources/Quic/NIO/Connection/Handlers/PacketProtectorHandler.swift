@@ -152,6 +152,9 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
         var datagramPayload = ByteBuffer()
 
         packets.forEach { packet in
+            // Drop truly empty packets (e.g. timer-triggered when no ACK is pending)
+            guard packet.payload.isEmpty == false else { log.debug("dropping empty outbound packet"); return }
+
             log.trace("encrypting packet", metadata: ["type": .string(String(describing: PacketType(packet.header.firstByte)))])
 
             do {
@@ -173,6 +176,12 @@ final class PacketProtectorHandler: ChannelDuplexHandler {
                 context.fireErrorCaught(error)
                 return
             }
+        }
+
+        // Avoid writing zero-length datagrams
+        guard datagramPayload.readableBytes > 0 else {
+            promise?.succeed(())
+            return
         }
 
         let datagram = AddressedEnvelope(remoteAddress: remoteAddress, data: datagramPayload)
@@ -313,6 +322,12 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
 
     internal var encryptedTrafficBuffer: ByteBuffer = ByteBuffer()
 
+    // Anti-amplification tracking (server-side)
+    private var antiAmplificationValidated: Bool = false
+    private var bytesReceivedFromPeer: Int = 0
+    private var bytesSentToPeer: Int = 0
+    private var amplificationSendQueue: [ByteBuffer] = []
+
     init(initialDCID dcid: ConnectionID, scid: ConnectionID, version: Version, perspective: EndpointRole, remoteAddress: SocketAddress) {
         self.perspective = perspective
         self.scid = scid
@@ -337,6 +352,9 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = self.unwrapInboundIn(data)
+
+        // Track received bytes for anti-amplification prior to address validation
+        self.bytesReceivedFromPeer &+= buffer.readableBytes
 
         log.trace("inbound buffer", metadata: ["size": .stringConvertible(buffer.readableBytes)])
 
@@ -371,6 +389,11 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
                     guard let p = buffer.readEncryptedQuicHandshakePacket(using: handshakeKeys) else {
                         context.fireErrorCaught(Errors.InvalidPacket)
                         break
+                    }
+                    // Receiving a valid Handshake packet from the peer validates the address
+                    if self.antiAmplificationValidated == false {
+                        self.antiAmplificationValidated = true
+                        self.flushAmplificationQueue(context: context)
                     }
                     packet = p
                 case .Short:
@@ -439,8 +462,27 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
             }
         }
 
-        //let datagram = AddressedEnvelope(remoteAddress: remoteAddress, data: datagramPayload)
-        log.trace("sending datagram", metadata: ["size": .stringConvertible(datagramPayload.readableBytes)])
+        // Attempt to flush any previously queued datagrams within the current limit
+        self.flushAmplificationQueue(context: context)
+
+        // Enforce QUIC anti-amplification prior to address validation (3x bytes received)
+        let datagramBytes = datagramPayload.readableBytes
+        if self.antiAmplificationValidated == false {
+            let allowed = (self.bytesReceivedFromPeer &* 3) &- self.bytesSentToPeer
+            if datagramBytes > allowed {
+                log.debug("anti-amplification: queueing datagram", metadata: [
+                    "bytes": .stringConvertible(datagramBytes),
+                    "allowed": .stringConvertible(max(0, allowed)),
+                    "rx": .stringConvertible(self.bytesReceivedFromPeer),
+                    "tx": .stringConvertible(self.bytesSentToPeer)
+                ])
+                self.amplificationSendQueue.append(datagramPayload)
+                return
+            }
+        }
+
+        self.bytesSentToPeer &+= datagramBytes
+        log.trace("sending datagram", metadata: ["size": .stringConvertible(datagramBytes)])
         context.writeAndFlush(self.wrapOutboundOut(datagramPayload), promise: promise)
     }
 
@@ -546,5 +588,43 @@ final class PacketProtectorHandler2: ChannelDuplexHandler {
         }
 
         // TODO: Check if short packet is long enough...
+    }
+
+    private func flushAmplificationQueue(context: ChannelHandlerContext) {
+        if self.antiAmplificationValidated {
+            // After validation, flush everything
+            while self.amplificationSendQueue.isEmpty == false {
+                var buf = self.amplificationSendQueue.removeFirst()
+                let size = buf.readableBytes
+                self.bytesSentToPeer &+= size
+                log.trace("flushing queued datagram post-validation", metadata: ["size": .stringConvertible(size)])
+                context.write(self.wrapOutboundOut(buf), promise: nil)
+            }
+            context.flush()
+            return
+        }
+
+        // Prior to validation, respect 3x limit
+        var allowed = (self.bytesReceivedFromPeer &* 3) &- self.bytesSentToPeer
+        while self.amplificationSendQueue.isEmpty == false {
+            guard let nextSize = self.amplificationSendQueue.first?.readableBytes else { break }
+            if nextSize <= allowed {
+                var buf = self.amplificationSendQueue.removeFirst()
+                self.bytesSentToPeer &+= nextSize
+                allowed &-= nextSize
+                log.trace("flushing queued datagram within limit", metadata: ["size": .stringConvertible(nextSize), "allowed": .stringConvertible(allowed)])
+                context.write(self.wrapOutboundOut(buf), promise: nil)
+            } else {
+                break
+            }
+        }
+        context.flush()
+    }
+
+    // MARK: - Testing Utilities
+    /// Marks address validation complete (testing only).
+    /// This is intended for unit tests to simulate successful validation without performing a full TLS handshake.
+    internal func _testingMarkAddressValidated() {
+        self.antiAmplificationValidated = true
     }
 }

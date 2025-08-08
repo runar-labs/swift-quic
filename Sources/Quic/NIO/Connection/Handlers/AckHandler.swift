@@ -130,26 +130,17 @@ final class ACKChannelHandler: ChannelDuplexHandler {
 final class ACKHandler {
     let epoch: Epoch
     // The largest packet number acked by our peer
-    var largestSentAcked: UInt64? {
-        didSet { print("ACKHandler[\(self.epoch)]::LargestSentAcked \(oldValue?.description ?? "NIL") -> \(self.largestSentAcked?.description ?? "NIL")") }
-    }
+    var largestSentAcked: UInt64?
 
     // The largest packet number we've sent
-    var largestSent: UInt64! {
-        didSet { print("ACKHandler[\(self.epoch)]::LargestSent \(oldValue?.description ?? "NIL") -> \(self.largestSent?.description ?? "NIL")") }
-    }
+    var largestSent: UInt64!
 
     // The largest packet number we've acked
-    var largestReceivedAcked: UInt64? {
-        didSet { print("ACKHandler[\(self.epoch)]::LargestReceivedAcked \(oldValue?.description ?? "NIL") -> \(self.largestReceivedAcked?.description ?? "NIL")") }
-    }
+    var largestReceivedAcked: UInt64?
 
     // The largeset packet number we've received
     var largestReceived: UInt64! {
-        didSet {
-            print("ACKHandler[\(self.epoch)]::LargestReceived \(oldValue?.description ?? "NIL") -> \(self.largestReceived?.description ?? "NIL")")
-            self.receivedTimestamp = DispatchTime.now().uptimeNanoseconds
-        }
+        didSet { self.receivedTimestamp = DispatchTime.now().uptimeNanoseconds }
     }
 
     var receivedTimestamp: UInt64?
